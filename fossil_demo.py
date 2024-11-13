@@ -38,6 +38,9 @@ class FossilExplorationNode(WorldROSWrapper):
         )
         self.collection_queue = []
         self.collector_busy = False
+
+        # Add tracking for collected fossils
+        self.collected_fossils = []
         
         self.get_logger().info('FossilExplorationNode initialized')
 
@@ -61,6 +64,33 @@ class FossilExplorationNode(WorldROSWrapper):
                 self.get_logger().warn(f"Planning attempt {attempt + 1} failed: {str(e)}")
                 continue
         return None
+
+    def collect_fossil(self, fossil, collector):
+        if not hasattr(fossil, 'pose'):
+            return False
+            
+        try:
+            # Store the fossil's original pose
+            fossil.original_pose = Pose(
+                x=fossil.pose.x,
+                y=fossil.pose.y,
+                yaw=fossil.pose.yaw
+            )
+            
+            # Update the fossil's pose to match the collector's position
+            # Offset slightly to make it visible
+            fossil.pose.x = collector.get_pose().x
+            fossil.pose.y = collector.get_pose().y
+            
+            # Add to collected fossils list
+            self.collected_fossils.append(fossil)
+            
+            self.get_logger().info(f"Collected fossil at ({fossil.original_pose.x:.2f}, {fossil.original_pose.y:.2f})")
+            return True
+            
+        except Exception as e:
+            self.get_logger().error(f"Error collecting fossil: {str(e)}")
+            return False
 
     def get_robot_by_name(self, name):
         for robot in self.world.robots:
@@ -142,8 +172,6 @@ class FossilExplorationNode(WorldROSWrapper):
         return None
 
     def get_valid_collection_pose(self, fossil_x, fossil_y, robot, approach_radius=0.8):
-        """Get a valid pose near the fossil for collection
-        Increased approach_radius to 0.8 (fossil radius 0.3 + robot radius 0.2 + safety margin 0.3)"""
         current_pose = robot.get_pose()
         self.get_logger().info(f"Robot at ({current_pose.x:.2f}, {current_pose.y:.2f}), trying to reach fossil at ({fossil_x:.2f}, {fossil_y:.2f})")
         
@@ -170,8 +198,6 @@ class FossilExplorationNode(WorldROSWrapper):
         return None
 
     def get_valid_base_pose(self, robot, base_radius=0.8):
-        """Get a valid pose near the base for return
-        base_radius should be larger than base_station radius (0.5) plus robot radius (0.2)"""
         current_pose = robot.get_pose()
         self.get_logger().info(f"Robot at ({current_pose.x:.2f}, {current_pose.y:.2f}), trying to find path to base")
         
@@ -196,7 +222,6 @@ class FossilExplorationNode(WorldROSWrapper):
         return None
 
     def remove_fossil_from_world(self, x, y, radius=0.3):
-        """Remove a fossil from the world at the given coordinates"""
         if not hasattr(self, 'world'):
             return False
             
@@ -253,6 +278,24 @@ class FossilExplorationNode(WorldROSWrapper):
                 self.collection_queue.append((x, y))
                 self.get_logger().info(f'Added fossil at ({x}, {y}) to collection queue')
 
+    def deposit_fossils_at_base(self, collector):
+        for fossil in self.collected_fossils:
+            try:
+                # Place fossils in a circle around the base
+                angle = len(self.collected_fossils) * (2 * np.pi / max(len(self.collected_fossils), 1))
+                deposit_radius = 0.3  # Distance from base center
+                
+                fossil.pose.x = deposit_radius * np.cos(angle)
+                fossil.pose.y = deposit_radius * np.sin(angle)
+                
+                self.get_logger().info(f"Deposited fossil at base position ({fossil.pose.x:.2f}, {fossil.pose.y:.2f})")
+                
+            except Exception as e:
+                self.get_logger().error(f"Error depositing fossil: {str(e)}")
+        
+        # Clear the collected fossils list
+        self.collected_fossils = []
+
     def collector_behavior(self):
         if not hasattr(self, 'world'):
             return
@@ -278,15 +321,22 @@ class FossilExplorationNode(WorldROSWrapper):
                     self.get_logger().warn(f'Failed to plan path to collection pose')
             else:
                 self.get_logger().warn(f'Failed to find valid collection pose near ({x}, {y})')
-                # Move fossil to end of queue instead of dropping it
                 self.collection_queue.append(self.collection_queue.pop(0))
         
         elif self.collector_busy and not collector.is_moving():
-            # At fossil location, remove fossil and plan return to base
+            # At fossil location, collect fossil and plan return to base
             if self.collection_queue:
                 x, y = self.collection_queue.pop(0)
-                self.remove_fossil_from_world(x, y)
-                time.sleep(0.5)  # Small delay after collection
+                
+                # Find and collect the fossil
+                fossil_objects = [obj for obj in self.world.objects if obj.category == 'fossil']
+                for fossil in fossil_objects:
+                    dx = fossil.pose.x - x
+                    dy = fossil.pose.y - y
+                    distance = np.sqrt(dx*dx + dy*dy)
+                    if distance < 0.3:  # Collection radius
+                        self.collect_fossil(fossil, collector)
+                        break
                 
             self.collector_busy = False
             self.returning_to_base = True
@@ -309,6 +359,10 @@ class FossilExplorationNode(WorldROSWrapper):
         
         elif self.returning_to_base and not collector.is_moving():
             time.sleep(0.5)  # Small delay to ensure we've reached position
+            
+            # Deposit fossils at base
+            self.deposit_fossils_at_base(collector)
+            
             self.returning_to_base = False
             self.get_logger().info('Successfully reached base station')
             self.get_logger().info(f'Remaining fossils in queue: {len(self.collection_queue)}')
@@ -326,7 +380,7 @@ def create_fossil_world():
     exploration_coords = [(-5, -5), (5, -5), (5, 5), (-5, 5)]
     world.add_room(name="exploration_zone", footprint=exploration_coords, color=[0.8, 0.8, 0.8])
 
-    # Add base station
+    # Add base stationf
     base = world.add_location(
         name="base_station0",  # Explicit name
         category="base_station",

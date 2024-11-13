@@ -20,86 +20,130 @@ from pyrobosim_ros.ros_interface import WorldROSWrapper
 data_folder = get_data_folder()
 
 
-def create_world():
-    """Create a test world"""
+def check_for_fossils(self, robot_pose, detection_radius=0.5):
+        """Check for fossils near the robot"""
+        if not hasattr(self, 'world'):
+            return None
+            
+        fossil_objects = [obj for obj in self.world.objects if obj.category == 'fossil']
+        
+        # Debug print all fossil objects
+        self.get_logger().debug(f"All fossils: {[(obj.category, obj.pose.x, obj.pose.y) for obj in fossil_objects]}")
+        
+        for fossil in fossil_objects:
+            dx = fossil.pose.x - robot_pose.x
+            dy = fossil.pose.y - robot_pose.y
+            distance = np.sqrt(dx*dx + dy*dy)
+            
+            if distance < detection_radius:
+                return fossil
+        return None
+
+    def remove_fossil_from_world(self, x, y, radius=0.3):
+        """Remove a fossil object from the world at the given coordinates"""
+        if not hasattr(self, 'world'):
+            return False
+            
+        fossil_objects = [obj for obj in self.world.objects if obj.category == 'fossil']
+        
+        for fossil in fossil_objects:
+            dx = fossil.pose.x - x
+            dy = fossil.pose.y - y
+            distance = np.sqrt(dx*dx + dy*dy)
+            
+            if distance < radius:
+                try:
+                    # Get the object ID
+                    object_id = fossil.name if hasattr(fossil, 'name') else None
+                    self.get_logger().info(f"Attempting to remove fossil object with ID: {object_id}")
+                    
+                    # Remove the object
+                    if hasattr(self.world, 'remove_object'):
+                        self.world.remove_object(object_id)
+                        self.get_logger().info(f"Removed fossil {object_id} at ({x:.2f}, {y:.2f})")
+                    else:
+                        self.world.objects.remove(fossil)
+                        self.get_logger().info(f"Removed fossil at ({x:.2f}, {y:.2f}) from objects list")
+                    
+                    # Update internal tracking
+                    if fossil in self.discovered_fossils:
+                        self.discovered_fossils.remove(fossil)
+                    
+                    # Force a world state update if possible
+                    if hasattr(self, 'publish_state'):
+                        self.publish_state()
+                        
+                    return True
+                except Exception as e:
+                    self.get_logger().error(f"Error removing fossil: {str(e)}")
+                    return False
+                
+        return False
+
+def create_fossil_world():
     world = World()
 
-    # Set the location and object metadata
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    
     world.set_metadata(
-        locations=os.path.join(data_folder, "example_location_data.yaml"),
-        objects=os.path.join(data_folder, "example_object_data.yaml"),
+        locations=os.path.join(current_dir, "fossil_location_data.yaml"),
+        objects=os.path.join(current_dir, "fossil_object_data.yaml"),
     )
 
-    # Add rooms
-    r1coords = [(-1, -1), (1.5, -1), (1.5, 1.5), (0.5, 1.5)]
-    world.add_room(name="kitchen", footprint=r1coords, color=[1, 0, 0])
-    r2coords = [(1.75, 2.5), (3.5, 2.5), (3.5, 4), (1.75, 4)]
-    world.add_room(name="bedroom", footprint=r2coords, color=[0, 0.6, 0])
-    r3coords = [(-1, 1), (-1, 3.5), (-3.0, 3.5), (-2.5, 1)]
-    world.add_room(name="bathroom", footprint=r3coords, color=[0, 0, 0.6])
+    exploration_coords = [(-5, -5), (5, -5), (5, 5), (-5, 5)]
+    world.add_room(name="exploration_zone", footprint=exploration_coords, color=[0.8, 0.8, 0.8])
 
-    # Add hallways between the rooms
-    world.add_hallway(room_start="kitchen", room_end="bathroom", width=0.7)
-    world.add_hallway(
-        room_start="bathroom",
-        room_end="bedroom",
-        width=0.5,
-        conn_method="angle",
-        conn_angle=0,
-        offset=0.8,
-    )
-    world.add_hallway(
-        room_start="kitchen",
-        room_end="bedroom",
-        width=0.6,
-        conn_method="points",
-        conn_points=[(1.0, 0.5), (2.5, 0.5), (2.5, 3.0)],
+    # Add base station as location
+    base = world.add_location(
+        name="base_station0",
+        category="base_station",
+        parent="exploration_zone",
+        pose=Pose(x=0.0, y=0.0, yaw=0.0)
     )
 
-    # Add locations
-    table = world.add_location(
-        category="table", parent="kitchen", pose=Pose(x=0.85, y=-0.5, yaw=-np.pi / 2.0)
-    )
-    desk = world.add_location(
-        category="desk", parent="bedroom", pose=Pose(x=3.15, y=3.65, yaw=0.0)
-    )
-    counter = world.add_location(
-        category="counter",
-        parent="bathroom",
-        pose=Pose(x=-2.45, y=2.5, yaw=np.pi / 2.0 + np.pi / 16.0),
-    )
-
-    # Add objects
+    # Add fossils as objects
     world.add_object(
-        category="banana", parent=table, pose=Pose(x=1.0, y=-0.5, yaw=np.pi / 4.0)
+        name="fossil0",
+        category="fossil",
+        parent="exploration_zone",
+        pose=Pose(x=3.0, y=3.0, yaw=0.0)
     )
-    world.add_object(category="apple", parent=desk, pose=Pose(x=3.2, y=3.5, yaw=0.0))
-    world.add_object(category="apple", parent=table)
-    world.add_object(category="apple", parent=table)
-    world.add_object(category="water", parent=counter)
-    world.add_object(category="banana", parent=counter)
-    world.add_object(category="water", parent=desk)
 
-    # Add a robot
-    # Create path planner
+    world.add_object(
+        name="fossil1",
+        category="fossil",
+        parent="exploration_zone",
+        pose=Pose(x=-2.0, y=-2.0, yaw=0.0)
+    )
+
     planner_config = {
         "world": world,
         "bidirectional": True,
-        "rrt_connect": False,
+        "rrt_connect": True,
         "rrt_star": True,
-        "collision_check_step_dist": 0.025,
-        "max_connection_dist": 0.5,
-        "rewire_radius": 1.5,
-        "compress_path": False,
+        "collision_check_step_dist": 0.05,
+        "max_connection_dist": 1.0,
+        "rewire_radius": 2.0,
+        "compress_path": True
     }
-    path_planner = RRTPlanner(**planner_config)
-    robot = Robot(
-        name="robot",
-        radius=0.1,
-        path_executor=ConstantVelocityExecutor(),
-        path_planner=path_planner,
+    
+    explorer_planner = RRTPlanner(**planner_config)
+    explorer = Robot(
+        name="explorer",
+        radius=0.2,
+        path_executor=ConstantVelocityExecutor(linear_velocity=0.5),
+        path_planner=explorer_planner,
     )
-    world.add_robot(robot, loc="kitchen")
+    world.add_robot(explorer, loc="exploration_zone")
+    
+    collector_planner = RRTPlanner(**planner_config)
+    collector = Robot(
+        name="collector",
+        radius=0.2,
+        path_executor=ConstantVelocityExecutor(linear_velocity=0.5),
+        path_planner=collector_planner,
+    )
+    world.add_robot(collector, loc="exploration_zone")
 
     return world
 
