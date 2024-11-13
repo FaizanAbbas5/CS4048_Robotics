@@ -25,9 +25,9 @@ class FossilExplorationNode(WorldROSWrapper):
         self.fossil_discovery_pub = self.create_publisher(String, 'fossil_discoveries', 10)
         self.discovered_fossils = set()
 
-        self.test_done = False  # Track if we've done the test
-        self.returning_to_base = False  # Track if collector is returning to base
-        self.test_timer = self.create_timer(10.0, self.test_fossil_discovery)  # Will trigger test
+        self.test_done = False
+        self.returning_to_base = False
+        self.test_timer = self.create_timer(5.0, self.test_fossil_discovery)
         
         self.collector_timer = self.create_timer(2.0, self.collector_behavior)
         self.fossil_discovery_sub = self.create_subscription(
@@ -40,6 +40,27 @@ class FossilExplorationNode(WorldROSWrapper):
         self.collector_busy = False
         
         self.get_logger().info('FossilExplorationNode initialized')
+
+    def safe_plan_path(self, robot, start_pose, goal_pose, retry_count=3):
+        for attempt in range(retry_count):
+            try:
+                path = robot.path_planner.plan(start_pose, goal_pose)
+                if path is not None:
+                    return path
+                # If path is None, try with slightly modified goal
+                offset = 0.2 * (attempt + 1)
+                modified_goal = Pose(
+                    x=goal_pose.x + np.random.uniform(-offset, offset),
+                    y=goal_pose.y + np.random.uniform(-offset, offset),
+                    yaw=goal_pose.yaw
+                )
+                path = robot.path_planner.plan(start_pose, modified_goal)
+                if path is not None:
+                    return path
+            except Exception as e:
+                self.get_logger().warn(f"Planning attempt {attempt + 1} failed: {str(e)}")
+                continue
+        return None
 
     def get_robot_by_name(self, name):
         for robot in self.world.robots:
@@ -58,10 +79,13 @@ class FossilExplorationNode(WorldROSWrapper):
             return
         
         current_pose = explorer.get_pose()
+        
+        # Print current position periodically
+        self.get_logger().debug(f"Explorer at ({current_pose.x:.2f}, {current_pose.y:.2f})")
+        
         fossil_site = self.check_for_fossils(current_pose)
         
         if fossil_site is not None and fossil_site not in self.discovered_fossils:
-
             self.discovered_fossils.add(fossil_site)
             
             msg = String()
@@ -71,25 +95,25 @@ class FossilExplorationNode(WorldROSWrapper):
             self.get_logger().info(f'Found fossil at ({fossil_site.pose.x:.2f}, {fossil_site.pose.y:.2f})')
                 
         if not self.explorer_exploring:
-
-            x = np.random.uniform(-4, 4)
-            y = np.random.uniform(-4, 4)
+            # Keep explorer away from the edges
+            margin = 0.5  # Stay 0.5 units away from edges
+            x = np.random.uniform(-4 + margin, 4 - margin)
+            y = np.random.uniform(-4 + margin, 4 - margin)
             
             self.get_logger().info(f'Planning move to ({x:.2f}, {y:.2f})')
-
-            try:
-                path = explorer.path_planner.plan(explorer.get_pose(), Pose(x=x, y=y))
-                if path is not None:
-                    explorer.follow_path(path)
-                    status_msg = String()
-                    status_msg.data = f'Moving to ({x:.2f}, {y:.2f})'
-                    self.explorer_status_pub.publish(status_msg)
-                    self.explorer_exploring = True
-                    self.get_logger().info('Started moving to target')
-                else:
-                    self.get_logger().warn('Failed to plan path to target position')
-            except Exception as e:
-                self.get_logger().error(f'Error in explorer movement: {str(e)}')
+            
+            goal_pose = Pose(x=x, y=y)
+            path = self.safe_plan_path(explorer, explorer.get_pose(), goal_pose)
+            
+            if path is not None:
+                explorer.follow_path(path)
+                status_msg = String()
+                status_msg.data = f'Moving to ({x:.2f}, {y:.2f})'
+                self.explorer_status_pub.publish(status_msg)
+                self.explorer_exploring = True
+                self.get_logger().info('Started moving to target')
+            else:
+                self.get_logger().warn('Failed to plan path to target position after multiple attempts')
         else:
             if not explorer.is_moving():
                 self.explorer_exploring = False
@@ -105,6 +129,9 @@ class FossilExplorationNode(WorldROSWrapper):
             
         fossil_sites = [loc for loc in self.world.locations if loc.category == 'fossil_site']
         
+        # Debug print all fossil sites
+        self.get_logger().debug(f"All fossil sites: {[(site.category, site.pose.x, site.pose.y) for site in fossil_sites]}")
+        
         for site in fossil_sites:
             dx = site.pose.x - robot_pose.x
             dy = site.pose.y - robot_pose.y
@@ -113,6 +140,103 @@ class FossilExplorationNode(WorldROSWrapper):
             if distance < detection_radius:
                 return site
         return None
+
+    def get_valid_collection_pose(self, fossil_x, fossil_y, robot, approach_radius=0.8):
+        """Get a valid pose near the fossil for collection
+        Increased approach_radius to 0.8 (fossil radius 0.3 + robot radius 0.2 + safety margin 0.3)"""
+        current_pose = robot.get_pose()
+        self.get_logger().info(f"Robot at ({current_pose.x:.2f}, {current_pose.y:.2f}), trying to reach fossil at ({fossil_x:.2f}, {fossil_y:.2f})")
+        
+        # Try different radii if needed
+        for radius in [0.8, 1.0, 1.2]:
+            angles = np.linspace(0, 2*np.pi, 16)  # Try 16 positions around the fossil
+            
+            for i, angle in enumerate(angles):
+                # Calculate position at radius from fossil
+                x = fossil_x + radius * np.cos(angle)
+                y = fossil_y + radius * np.sin(angle)
+                
+                self.get_logger().debug(f"Trying approach position {i+1}/16 at ({x:.2f}, {y:.2f}) with radius {radius}")
+                
+                # Try to plan a path to this position
+                goal_pose = Pose(x=x, y=y)
+                path = self.safe_plan_path(robot, robot.get_pose(), goal_pose)
+                
+                if path is not None:
+                    self.get_logger().info(f"Found valid collection pose at ({x:.2f}, {y:.2f}) with radius {radius}")
+                    return goal_pose
+                
+        self.get_logger().warn(f"Could not find any valid approach positions for fossil at ({fossil_x}, {fossil_y})")
+        return None
+
+    def get_valid_base_pose(self, robot, base_radius=0.8):
+        """Get a valid pose near the base for return
+        base_radius should be larger than base_station radius (0.5) plus robot radius (0.2)"""
+        current_pose = robot.get_pose()
+        self.get_logger().info(f"Robot at ({current_pose.x:.2f}, {current_pose.y:.2f}), trying to find path to base")
+        
+        angles = np.linspace(0, 2*np.pi, 16)  # Try 16 positions around the base
+        
+        for radius in [0.8, 1.0, 1.2]:  # Start with minimum safe distance
+            for i, angle in enumerate(angles):
+                # Calculate position at radius from base
+                x = radius * np.cos(angle)
+                y = radius * np.sin(angle)
+                
+                self.get_logger().debug(f"Trying base approach position at ({x:.2f}, {y:.2f})")
+                
+                goal_pose = Pose(x=x, y=y)
+                path = self.safe_plan_path(robot, robot.get_pose(), goal_pose)
+                
+                if path is not None:
+                    self.get_logger().info(f"Found valid base return pose at ({x:.2f}, {y:.2f})")
+                    return goal_pose
+        
+        self.get_logger().warn("Could not find any valid approach positions for base return")
+        return None
+
+    def remove_fossil_from_world(self, x, y, radius=0.3):
+        """Remove a fossil from the world at the given coordinates"""
+        if not hasattr(self, 'world'):
+            return False
+            
+        fossil_sites = [loc for loc in self.world.locations if loc.category == 'fossil_site']
+        
+        for site in fossil_sites:
+            dx = site.pose.x - x
+            dy = site.pose.y - y
+            distance = np.sqrt(dx*dx + dy*dy)
+            
+            if distance < radius:
+                try:
+                    # Get the location ID
+                    location_id = site.name if hasattr(site, 'name') else None
+                    self.get_logger().info(f"Attempting to remove fossil with ID: {location_id}")
+                    
+                    # Try to remove using the world's remove_location method
+                    if hasattr(self.world, 'remove_location'):
+                        self.world.remove_location(location_id)
+                        self.get_logger().info(f"Removed fossil {location_id} at ({x:.2f}, {y:.2f}) using remove_location")
+                    else:
+                        # Fallback: try to remove from locations list
+                        self.world.locations.remove(site)
+                        self.get_logger().info(f"Removed fossil at ({x:.2f}, {y:.2f}) from locations list")
+                    
+                    # Update any internal tracking
+                    if site in self.discovered_fossils:
+                        self.discovered_fossils.remove(site)
+                    
+                    # Force a world state update if possible
+                    if hasattr(self, 'publish_state'):
+                        self.publish_state()
+                        
+                    return True
+                except Exception as e:
+                    self.get_logger().error(f"Error removing fossil: {str(e)}")
+                    self.get_logger().error(f"Location properties: {dir(site)}")  # Debug info
+                    return False
+                
+        return False
 
     def test_fossil_discovery(self):
         if not self.test_done:  # Only trigger once
@@ -138,35 +262,56 @@ class FossilExplorationNode(WorldROSWrapper):
             return
                 
         if not self.collector_busy and not self.returning_to_base and self.collection_queue:
+            # Moving to fossil
             x, y = self.collection_queue[0]
             
-            try:
-                path = collector.path_planner.plan(collector.get_pose(), Pose(x=x, y=y))
+            # Get a valid pose near the fossil
+            goal_pose = self.get_valid_collection_pose(x, y, collector)
+            
+            if goal_pose is not None:
+                path = collector.path_planner.plan(collector.get_pose(), goal_pose)
                 if path is not None:
                     collector.follow_path(path)
                     self.collector_busy = True
-                    self.get_logger().info(f'Collector moving to fossil at ({x}, {y})')
-            except Exception as e:
-                self.get_logger().error(f'Error in collector movement: {str(e)}')
+                    self.get_logger().info(f'Collector moving near fossil at ({x}, {y})')
+                else:
+                    self.get_logger().warn(f'Failed to plan path to collection pose')
+            else:
+                self.get_logger().warn(f'Failed to find valid collection pose near ({x}, {y})')
+                # Move fossil to end of queue instead of dropping it
+                self.collection_queue.append(self.collection_queue.pop(0))
         
         elif self.collector_busy and not collector.is_moving():
+            # At fossil location, remove fossil and plan return to base
             if self.collection_queue:
-                self.collection_queue.pop(0)
+                x, y = self.collection_queue.pop(0)
+                self.remove_fossil_from_world(x, y)
+                time.sleep(0.5)  # Small delay after collection
+                
             self.collector_busy = False
             self.returning_to_base = True
-            self.get_logger().info('Fossil collected, returning to base')
+            self.get_logger().info('Fossil collected, planning return to base')
             
-            try:
-                path = collector.path_planner.plan(collector.get_pose(), Pose(x=0.0, y=0.0))
+            # Try to find a valid return pose near base
+            goal_pose = self.get_valid_base_pose(collector)
+            
+            if goal_pose is not None:
+                path = collector.path_planner.plan(collector.get_pose(), goal_pose)
                 if path is not None:
                     collector.follow_path(path)
-            except Exception as e:
-                self.get_logger().error(f'Error returning to base: {str(e)}')
+                    self.get_logger().info(f'Returning to base position at ({goal_pose.x:.2f}, {goal_pose.y:.2f})')
+                else:
+                    self.get_logger().error('Failed to plan path to valid base position')
+                    self.returning_to_base = False
+            else:
+                self.get_logger().error('Could not find any valid base return position')
+                self.returning_to_base = False
         
         elif self.returning_to_base and not collector.is_moving():
+            time.sleep(0.5)  # Small delay to ensure we've reached position
             self.returning_to_base = False
-            self.get_logger().info('Reached base station')
-
+            self.get_logger().info('Successfully reached base station')
+            self.get_logger().info(f'Remaining fossils in queue: {len(self.collection_queue)}')
 
 def create_fossil_world():
     world = World()
@@ -181,19 +326,24 @@ def create_fossil_world():
     exploration_coords = [(-5, -5), (5, -5), (5, 5), (-5, 5)]
     world.add_room(name="exploration_zone", footprint=exploration_coords, color=[0.8, 0.8, 0.8])
 
+    # Add base station
     base = world.add_location(
+        name="base_station0",  # Explicit name
         category="base_station",
         parent="exploration_zone",
         pose=Pose(x=0.0, y=0.0, yaw=0.0)
     )
 
+    # Add fossils with explicit names
     world.add_location(
+        name="fossil_site0",  # Explicit name
         category="fossil_site",
         parent="exploration_zone",
-        pose=Pose(x=2.0, y=2.0, yaw=0.0)
+        pose=Pose(x=3.0, y=3.0, yaw=0.0)
     )
 
     world.add_location(
+        name="fossil_site1",  # Explicit name
         category="fossil_site",
         parent="exploration_zone",
         pose=Pose(x=-2.0, y=-2.0, yaw=0.0)
@@ -202,19 +352,19 @@ def create_fossil_world():
     planner_config = {
         "world": world,
         "bidirectional": True,
-        "rrt_connect": False,
+        "rrt_connect": True,
         "rrt_star": True,
-        "collision_check_step_dist": 0.025,
-        "max_connection_dist": 0.5,
-        "rewire_radius": 1.5,
-        "compress_path": False,
+        "collision_check_step_dist": 0.05,
+        "max_connection_dist": 1.0,
+        "rewire_radius": 2.0,
+        "compress_path": True
     }
     
     explorer_planner = RRTPlanner(**planner_config)
     explorer = Robot(
         name="explorer",
         radius=0.2,
-        path_executor=ConstantVelocityExecutor(linear_velocity=0.5),  # Added velocity
+        path_executor=ConstantVelocityExecutor(linear_velocity=0.5),
         path_planner=explorer_planner,
     )
     world.add_robot(explorer, loc="exploration_zone")
@@ -223,7 +373,7 @@ def create_fossil_world():
     collector = Robot(
         name="collector",
         radius=0.2,
-        path_executor=ConstantVelocityExecutor(linear_velocity=0.5),  # Added velocity
+        path_executor=ConstantVelocityExecutor(linear_velocity=0.5),
         path_planner=collector_planner,
     )
     world.add_robot(collector, loc="exploration_zone")
