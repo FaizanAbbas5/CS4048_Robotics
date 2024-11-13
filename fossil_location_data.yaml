@@ -4,11 +4,25 @@ base_station:
   footprint:
     type: circle
     radius: 0.5
+    height: 0.5
   height: 0.0
+  locations:
+    - name: "top"
+      footprint:
+        type: parent
+        padding: 0.0
+  color: [1, 0, 0]
 
 fossil_site:
   description: Location where fossils might be found
   footprint:
     type: circle
-    radius: 0.3
+    radius: 0.5
+    height: 0.5
   height: 0.0
+  locations:
+    - name: "top"
+      footprint:
+        type: parent
+        padding: 0.0
+  color: [0, 1, 0]

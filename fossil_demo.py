@@ -8,6 +8,8 @@ from geometry_msgs.msg import Point, Pose2D
 from std_msgs.msg import String
 
 from pyrobosim.core import Robot, World
+from pyrobosim.core.objects import Object
+
 from pyrobosim.gui import start_gui
 from pyrobosim.navigation import ConstantVelocityExecutor, RRTPlanner
 from pyrobosim.utils.pose import Pose
@@ -25,7 +27,7 @@ class FossilExplorationNode(WorldROSWrapper):
         self.fossil_discovery_pub = self.create_publisher(String, 'fossil_discoveries', 10)
         self.discovered_fossils = set()
 
-        self.test_done = False
+        self.test_done = True
         self.returning_to_base = False
         self.test_timer = self.create_timer(5.0, self.test_fossil_discovery)
         
@@ -70,6 +72,11 @@ class FossilExplorationNode(WorldROSWrapper):
             return False
             
         try:
+            robot = self.get_robot_by_name("collector")
+            success = robot.pick_object("fossil1")
+            self.get_logger().info(f"Collected fossil at ({success})")
+            return success
+
             # Store the fossil's original pose
             fossil.original_pose = Pose(
                 x=fossil.pose.x,
@@ -156,7 +163,10 @@ class FossilExplorationNode(WorldROSWrapper):
     def check_for_fossils(self, robot_pose, detection_radius=0.5):
         if not hasattr(self, 'world'):
             return None
-            
+        
+        robot = self.get_robot_by_name("explorer")
+        success = robot.detect_objects("fossil1")
+    
         fossil_sites = [loc for loc in self.world.locations if loc.category == 'fossil_site']
         
         # Debug print all fossil sites
@@ -396,11 +406,23 @@ def create_fossil_world():
         pose=Pose(x=3.0, y=3.0, yaw=0.0)
     )
 
-    world.add_location(
+    s1 = world.add_location(
         name="fossil_site1",  # Explicit name
         category="fossil_site",
         parent="exploration_zone",
         pose=Pose(x=-2.0, y=-2.0, yaw=0.0)
+    )
+    # o = Object(
+    #     name="fossil1",
+    #     category="fossil",
+    #     pose=Pose(x=1.0, y=1.0)
+    # )
+    world.add_object(
+        # object=o,
+        name="fossil1",
+        category="fossil",
+        # pose=Pose(x=1.0, y=1.0),
+        parent=s1
     )
 
     planner_config = {
