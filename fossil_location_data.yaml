@@ -1,0 +1,14 @@
+# fossil_location_data.yaml
+base_station:
+  description: Base station for robots
+  footprint:
+    type: circle
+    radius: 0.5
+  height: 0.0
+
+fossil_site:
+  description: Location where fossils might be found
+  footprint:
+    type: circle
+    radius: 0.3
+  height: 0.0

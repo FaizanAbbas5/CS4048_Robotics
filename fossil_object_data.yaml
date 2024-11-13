@@ -1,0 +1,5 @@
+# fossil_object_data.yaml
+fossil:
+  description: A discovered fossil
+  size: [0.2, 0.2, 0.1]
+  shape: cylinder
