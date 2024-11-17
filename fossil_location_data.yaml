@@ -4,8 +4,10 @@ base_station:
   footprint:
     type: circle
     radius: 0.5
-    height: 0.5
-  height: 0.0
+    height: 0.1
+  nav_poses:
+    - [0, 1, -1.57]
+    - [0, -1, 1.57]
   locations:
     - name: "top"
       footprint:
@@ -18,8 +20,12 @@ fossil_site:
   footprint:
     type: circle
     radius: 0.5
-    height: 0.5
-  height: 0.0
+    height: 0.1
+  nav_poses:
+    - [-1, 0, 0]     # left
+    - [1, 0, 3.14]   # right
+    - [0, 1, -1.57]  # above
+    - [0, -1, 1.57]  # below
   locations:
     - name: "top"
       footprint:

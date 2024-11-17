@@ -7,7 +7,9 @@ from rclpy.node import Node
 from geometry_msgs.msg import Point, Pose2D
 from std_msgs.msg import String
 
-from pyrobosim.core import Robot, World
+from pyrobosim.manipulation import GraspGenerator, ParallelGraspProperties
+
+from pyrobosim.core import Robot, World, ObjectSpawn, Location
 from pyrobosim.core.objects import Object
 
 from pyrobosim.gui import start_gui
@@ -121,15 +123,21 @@ class FossilExplorationNode(WorldROSWrapper):
         self.get_logger().debug(f"Explorer at ({current_pose.x:.2f}, {current_pose.y:.2f})")
         
         fossil_site = self.check_for_fossils(current_pose)
-        
-        if fossil_site is not None and fossil_site not in self.discovered_fossils:
-            self.discovered_fossils.add(fossil_site)
-            
+        obj = self.get_first_object()
+
+        if obj is not None:
             msg = String()
             msg.data = f"FOSSIL_FOUND:{fossil_site.pose.x},{fossil_site.pose.y}"
             self.fossil_discovery_pub.publish(msg)
+        
+        # if fossil_site is not None and fossil_site not in self.discovered_fossils:
+        #     self.discovered_fossils.add(fossil_site)
             
-            self.get_logger().info(f'Found fossil at ({fossil_site.pose.x:.2f}, {fossil_site.pose.y:.2f})')
+        #     msg = String()
+        #     msg.data = f"FOSSIL_FOUND:{fossil_site.pose.x},{fossil_site.pose.y}"
+        #     self.fossil_discovery_pub.publish(msg)
+            
+        #     self.get_logger().info(f'Found fossil at ({fossil_site.pose.x:.2f}, {fossil_site.pose.y:.2f})')
                 
         if not self.explorer_exploring:
             # Keep explorer away from the edges
@@ -158,7 +166,12 @@ class FossilExplorationNode(WorldROSWrapper):
                 status_msg.data = 'Reached destination, planning next move'
                 self.explorer_status_pub.publish(status_msg)
                 self.get_logger().info('Reached destination')
-            
+    
+    def get_first_object(self):
+        fossil_objects: list[Object] = [obj for obj in self.world.objects if obj.category == 'fossil']
+        if len(fossil_objects) > 0:
+            first = fossil_objects[0]
+            return first
 
     def check_for_fossils(self, robot_pose, detection_radius=0.5):
         if not hasattr(self, 'world'):
@@ -169,6 +182,7 @@ class FossilExplorationNode(WorldROSWrapper):
     
         fossil_sites = [loc for loc in self.world.locations if loc.category == 'fossil_site']
         
+
         # Debug print all fossil sites
         self.get_logger().debug(f"All fossil sites: {[(site.category, site.pose.x, site.pose.y) for site in fossil_sites]}")
         
@@ -313,7 +327,7 @@ class FossilExplorationNode(WorldROSWrapper):
         collector = self.get_robot_by_name('collector')
         if collector is None:
             return
-                
+        
         if not self.collector_busy and not self.returning_to_base and self.collection_queue:
             # Moving to fossil
             x, y = self.collection_queue[0]
@@ -388,7 +402,7 @@ def create_fossil_world():
     )
 
     exploration_coords = [(-5, -5), (5, -5), (5, 5), (-5, 5)]
-    world.add_room(name="exploration_zone", footprint=exploration_coords, color=[0.8, 0.8, 0.8])
+    room = world.add_room(name="exploration_zone", footprint=exploration_coords, color=[0.8, 0.8, 0.8])
 
     # Add base stationf
     base = world.add_location(
@@ -399,7 +413,7 @@ def create_fossil_world():
     )
 
     # Add fossils with explicit names
-    world.add_location(
+    s0 = world.add_location(
         name="fossil_site0",  # Explicit name
         category="fossil_site",
         parent="exploration_zone",
@@ -424,14 +438,44 @@ def create_fossil_world():
         # pose=Pose(x=1.0, y=1.0),
         parent=s1
     )
+    world.add_object(
+        # object=o,
+        name="fossil2",
+        category="fossil",
+        # pose=Pose(x=1.0, y=1.0),
+        parent=s1
+    )
+    world.add_object(
+        # object=o,
+        name="fossil3",
+        category="fossil",
+        # pose=Pose(x=1.0, y=1.0),
+        parent=s0
+    )
+
+    # world.add_object(
+    #     # object=o,
+    #     name="fossil2",
+    #     category="fossil",
+    #     # pose=Pose(x=1.0, y=1.0),
+    #     room=room,
+    # )
+
+    objspawn = ObjectSpawn(name="smtg", metadata={}, parent=s1)
+    # Example object with pose (no parent location)
+    obj_pose = Pose(x=1.0, y=1.0)  # Set the object's position in the room
+    new_object = Object(name="fossil2", category="fossil", pose=obj_pose, parent=objspawn)
+    # Add the object to the room
+    world.add_object(object=new_object)
+    # room.objects.append(new_object)
 
     planner_config = {
         "world": world,
         "bidirectional": True,
-        "rrt_connect": True,
+        "rrt_connect": False,
         "rrt_star": True,
-        "collision_check_step_dist": 0.05,
-        "max_connection_dist": 1.0,
+        "collision_check_step_dist": 0.025,
+        "max_connection_dist": 0.5,
         "rewire_radius": 2.0,
         "compress_path": True
     }
@@ -440,17 +484,28 @@ def create_fossil_world():
     explorer = Robot(
         name="explorer",
         radius=0.2,
-        path_executor=ConstantVelocityExecutor(linear_velocity=0.5),
+        path_executor=ConstantVelocityExecutor(linear_velocity=0.7),
         path_planner=explorer_planner,
     )
     world.add_robot(explorer, loc="exploration_zone")
     
+    # Add robots
+    grasp_props = ParallelGraspProperties(
+        max_width=0.175,
+        depth=0.1,
+        height=0.04,
+        width_clearance=0.01,
+        depth_clearance=0.01,
+    )
+
     collector_planner = RRTPlanner(**planner_config)
     collector = Robot(
         name="collector",
         radius=0.2,
-        path_executor=ConstantVelocityExecutor(linear_velocity=0.5),
+        # height=1.0,
+        path_executor=ConstantVelocityExecutor(linear_velocity=0.8),
         path_planner=collector_planner,
+        grasp_generator=GraspGenerator(grasp_props),
     )
     world.add_robot(collector, loc="exploration_zone")
 

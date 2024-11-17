@@ -3,5 +3,4 @@ fossil:
   footprint:
     type: box
     dims: [0.1, 0.1]
-  height: 0.1  # Give it a small height to make it visible
   color: [1, 0, 0]
