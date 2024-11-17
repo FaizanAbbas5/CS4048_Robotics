@@ -4,3 +4,9 @@ fossil:
     type: circle
     radius: 0.3
   height: 0.1  # Give it a small height to make it visible
+
+fossil1:
+  footprint:
+    type: circle
+    radius: 0.06
+  color: [1, 0, 0]

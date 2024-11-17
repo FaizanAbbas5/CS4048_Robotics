@@ -3,6 +3,7 @@ import rclpy
 import threading
 import numpy as np
 import time
+import random
 from rclpy.node import Node
 from geometry_msgs.msg import Point, Pose2D
 from std_msgs.msg import String
@@ -377,7 +378,7 @@ def create_fossil_world():
         objects=os.path.join(current_dir, "fossil_object_data.yaml"),
     )
 
-    exploration_coords = [(-5, -5), (5, -5), (5, 5), (-5, 5)]
+    exploration_coords = [(-10, -10), (10, -10), (10, 10), (-10, 10)]
     world.add_room(name="exploration_zone", footprint=exploration_coords, color=[0.8, 0.8, 0.8])
 
     # Add base stationf
@@ -388,20 +389,97 @@ def create_fossil_world():
         pose=Pose(x=0.0, y=0.0, yaw=0.0)
     )
 
-    # Add fossils with explicit names
-    world.add_location(
-        name="fossil_site0",  # Explicit name
-        category="fossil_site",
-        parent="exploration_zone",
-        pose=Pose(x=3.0, y=3.0, yaw=0.0)
-    )
+    nFossils = 5
+    location_list=[[-0.5,0.5,-0.5,0.5]] #Initially only base 
 
-    world.add_location(
-        name="fossil_site1",  # Explicit name
-        category="fossil_site",
-        parent="exploration_zone",
-        pose=Pose(x=-2.0, y=-2.0, yaw=0.0)
-    )
+    for i in range(nFossils):
+        #9.7 rather than 10 to avoid collision with room walls 
+        x = random.uniform(-9.7, 9.7)
+        y = random.uniform(-9.7, 9.7) 
+
+        loc_name = f"fossil_site{i}" 
+        obj_name = f"fossil{i}"
+        length = 0.3 #Side lengths of f1
+
+        # Add fossils with explicit names
+        parent = world.add_location(
+            name=loc_name,
+            category="f1",
+            parent="exploration_zone",
+            pose=Pose(x=x, y=y, yaw=0.0)
+        )
+        world.add_object(category="fossil1", parent=parent) #Add object
+
+        #Get dimensions of the location, store in location list
+        left = x - length/2 
+        right = x + length/2 
+        bottom = y - length/2
+        top = y + length/2 
+        location_list.append([left, right, bottom, top])
+
+    nRocks = 6
+
+    for i in range(nRocks):
+        collision = True
+        #Loop until coords are found with no collision 
+        while collision == True:
+            #9.3 rather than 10 to avoid collision with room walls 
+            x = random.uniform(-9.3, 9.3) 
+            y = random.uniform(-9.3, 9.3) 
+
+            #Get dimensions 
+            length = 1.25
+            left = x - length/2 
+            right = x + length/2 
+            bottom = y - length/2
+            top = y + length/2 
+
+            collision = False #If conditional for every loc is false, will exit loop
+            for loc in location_list:
+                if not (right < loc[0] or left > loc[1] or top < loc[2] or bottom > loc[3]):
+                    collision = True
+
+        loc_name = f"rock{i}" 
+
+        parent = world.add_location(
+            name=loc_name,
+            category="rock0",
+            parent="exploration_zone",
+            pose=Pose(x=x, y=y, yaw=0.0)
+        )
+        location_list.append([left, right, bottom, top])
+
+    nBushes = 4
+    for i in range(nBushes):
+        collision = True
+        #Loop until coords are found with no collision 
+        while collision == True:
+            x = random.uniform(-9.0, 9.0) 
+            y = random.uniform(-9.0, 9.0) 
+
+            #Get dimensions
+            length = 1.2 
+            left = x - length/2 
+            right = x + length/2 
+            bottom = y - length/2
+            top = y + length/2 
+
+            collision = False #If conditional for every loc is false, will exit loop
+            for loc in location_list:
+                if not (right < loc[0] or left > loc[1] or top < loc[2] or bottom > loc[3]):
+                    collision = True
+
+        loc_name = f"bush{i}" 
+
+        parent = world.add_location(
+            name=loc_name,
+            category="bush0",
+            parent="exploration_zone",
+            pose=Pose(x=x, y=y, yaw=0.0)
+        )
+        location_list.append([left, right, bottom, top])
+        
+        
 
     planner_config = {
         "world": world,
