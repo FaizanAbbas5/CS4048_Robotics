@@ -1,4 +1,5 @@
 import os
+from fossil_world_generation import create_fossil_world
 import rclpy
 import threading
 import numpy as np
@@ -8,7 +9,7 @@ from rclpy.node import Node
 from geometry_msgs.msg import Point, Pose2D
 from std_msgs.msg import String
 
-from pyrobosim.core import Robot, World
+from pyrobosim.core import Robot, World, Room
 from pyrobosim.gui import start_gui
 from pyrobosim.navigation import ConstantVelocityExecutor, RRTPlanner
 from pyrobosim.utils.pose import Pose
@@ -368,160 +369,15 @@ class FossilExplorationNode(WorldROSWrapper):
             self.get_logger().info('Successfully reached base station')
             self.get_logger().info(f'Remaining fossils in queue: {len(self.collection_queue)}')
 
-def create_fossil_world():
-    world = World()
-
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    
-    world.set_metadata(
-        locations=os.path.join(current_dir, "fossil_location_data.yaml"),
-        objects=os.path.join(current_dir, "fossil_object_data.yaml"),
-    )
-
-    #Variables to change size of map and density of objects
-    mapSize = 10 
-    nFossils = 5
-    nRocks = 6
-    nBushes = 4
-
-    exploration_coords = [(-mapSize, -mapSize), (mapSize, -mapSize), (mapSize, mapSize), (-mapSize, mapSize)]
-    world.add_room(name="exploration_zone", footprint=exploration_coords, color=[0.8, 0.8, 0.8])
-
-    # Add base stationf
-    base = world.add_location(
-        name="base_station0",  # Explicit name
-        category="base_station",
-        parent="exploration_zone",
-        pose=Pose(x=0.0, y=0.0, yaw=0.0)
-    )
-
-    location_list=[[-0.5,0.5,-0.5,0.5]] #Initially only base 
-
-    for i in range(nFossils):
-        #9.7 rather than 10 to avoid collision with room walls 
-        x = random.uniform(-mapSize-0.3, mapSize-0.3)
-        y = random.uniform(-mapSize-0.3, mapSize-0.3) 
-
-        loc_name = f"fossil_site{i}" 
-        obj_name = f"fossil{i}"
-        length = 0.3 #Side lengths of f1
-
-        # Add fossils with explicit names
-        parent = world.add_location(
-            name=loc_name,
-            category="f1",
-            parent="exploration_zone",
-            pose=Pose(x=x, y=y, yaw=0.0)
-        )
-        world.add_object(category="fossil1", parent=parent) #Add object
-
-        #Get dimensions of the location, store in location list
-        left = x - length/2 
-        right = x + length/2 
-        bottom = y - length/2
-        top = y + length/2 
-        location_list.append([left, right, bottom, top])
-
-
-    for i in range(nRocks):
-        collision = True
-        #Loop until coords are found with no collision 
-        while collision == True:
-            #9.3 rather than 10 to avoid collision with room walls 
-            x = random.uniform(-mapSize-0.7, mapSize-0.7) 
-            y = random.uniform(-mapSize-0.7, mapSize-0.7)  
-
-            #Get dimensions 
-            length = 1.25
-            left = x - length/2 
-            right = x + length/2 
-            bottom = y - length/2
-            top = y + length/2 
-
-            collision = False #If conditional for every loc is false, will exit loop
-            for loc in location_list:
-                if not (right < loc[0] or left > loc[1] or top < loc[2] or bottom > loc[3]):
-                    collision = True
-
-        loc_name = f"rock{i}" 
-
-        parent = world.add_location(
-            name=loc_name,
-            category="rock0",
-            parent="exploration_zone",
-            pose=Pose(x=x, y=y, yaw=0.0)
-        )
-        location_list.append([left, right, bottom, top])
-
-    for i in range(nBushes):
-        collision = True
-        #Loop until coords are found with no collision 
-        while collision == True:
-            x = random.uniform(-mapSize-1, mapSize-1) 
-            y = random.uniform(-mapSize-1, mapSize-1) 
-
-            #Get dimensions
-            length = 1.2 
-            left = x - length/2 
-            right = x + length/2 
-            bottom = y - length/2
-            top = y + length/2 
-
-            collision = False #If conditional for every loc is false, will exit loop
-            for loc in location_list:
-                if not (right < loc[0] or left > loc[1] or top < loc[2] or bottom > loc[3]):
-                    collision = True
-
-        loc_name = f"bush{i}" 
-
-        parent = world.add_location(
-            name=loc_name,
-            category="bush0",
-            parent="exploration_zone",
-            pose=Pose(x=x, y=y, yaw=0.0)
-        )
-        location_list.append([left, right, bottom, top])
-        
-        
-
-    planner_config = {
-        "world": world,
-        "bidirectional": True,
-        "rrt_connect": True,
-        "rrt_star": True,
-        "collision_check_step_dist": 0.05,
-        "max_connection_dist": 1.0,
-        "rewire_radius": 2.0,
-        "compress_path": True
-    }
-    
-    explorer_planner = RRTPlanner(**planner_config)
-    explorer = Robot(
-        name="explorer",
-        radius=0.2,
-        path_executor=ConstantVelocityExecutor(linear_velocity=0.5),
-        path_planner=explorer_planner,
-    )
-    world.add_robot(explorer, loc="exploration_zone")
-    
-    collector_planner = RRTPlanner(**planner_config)
-    collector = Robot(
-        name="collector",
-        radius=0.2,
-        path_executor=ConstantVelocityExecutor(linear_velocity=0.5),
-        path_planner=collector_planner,
-    )
-    world.add_robot(collector, loc="exploration_zone")
-
-    return world
-
 
 if __name__ == "__main__":
     rclpy.init()
     
     node = FossilExplorationNode()
     
-    world = create_fossil_world()
+    # world = create_fossil_world(random_seed=random.randint(0, 100))
+    world = create_fossil_world(random_seed=1123)
+
     node.set_world(world)
     
     node.get_logger().info('Starting FossilExplorationNode')
