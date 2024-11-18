@@ -480,6 +480,7 @@ def create_fossil_world():
         "compress_path": True
     }
     
+    # try rpmplanner
     explorer_planner = RRTPlanner(**planner_config)
     explorer = Robot(
         name="explorer",
