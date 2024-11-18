@@ -378,7 +378,13 @@ def create_fossil_world():
         objects=os.path.join(current_dir, "fossil_object_data.yaml"),
     )
 
-    exploration_coords = [(-10, -10), (10, -10), (10, 10), (-10, 10)]
+    #Variables to change size of map and density of objects
+    mapSize = 10 
+    nFossils = 5
+    nRocks = 6
+    nBushes = 4
+
+    exploration_coords = [(-mapSize, -mapSize), (mapSize, -mapSize), (mapSize, mapSize), (-mapSize, mapSize)]
     world.add_room(name="exploration_zone", footprint=exploration_coords, color=[0.8, 0.8, 0.8])
 
     # Add base stationf
@@ -389,13 +395,12 @@ def create_fossil_world():
         pose=Pose(x=0.0, y=0.0, yaw=0.0)
     )
 
-    nFossils = 5
     location_list=[[-0.5,0.5,-0.5,0.5]] #Initially only base 
 
     for i in range(nFossils):
         #9.7 rather than 10 to avoid collision with room walls 
-        x = random.uniform(-9.7, 9.7)
-        y = random.uniform(-9.7, 9.7) 
+        x = random.uniform(-mapSize-0.3, mapSize-0.3)
+        y = random.uniform(-mapSize-0.3, mapSize-0.3) 
 
         loc_name = f"fossil_site{i}" 
         obj_name = f"fossil{i}"
@@ -417,15 +422,14 @@ def create_fossil_world():
         top = y + length/2 
         location_list.append([left, right, bottom, top])
 
-    nRocks = 6
 
     for i in range(nRocks):
         collision = True
         #Loop until coords are found with no collision 
         while collision == True:
             #9.3 rather than 10 to avoid collision with room walls 
-            x = random.uniform(-9.3, 9.3) 
-            y = random.uniform(-9.3, 9.3) 
+            x = random.uniform(-mapSize-0.7, mapSize-0.7) 
+            y = random.uniform(-mapSize-0.7, mapSize-0.7)  
 
             #Get dimensions 
             length = 1.25
@@ -449,13 +453,12 @@ def create_fossil_world():
         )
         location_list.append([left, right, bottom, top])
 
-    nBushes = 4
     for i in range(nBushes):
         collision = True
         #Loop until coords are found with no collision 
         while collision == True:
-            x = random.uniform(-9.0, 9.0) 
-            y = random.uniform(-9.0, 9.0) 
+            x = random.uniform(-mapSize-1, mapSize-1) 
+            y = random.uniform(-mapSize-1, mapSize-1) 
 
             #Get dimensions
             length = 1.2 
