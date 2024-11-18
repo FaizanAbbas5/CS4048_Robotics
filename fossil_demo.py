@@ -1,8 +1,10 @@
 import os
+from fossil_world_generation import create_fossil_world
 import rclpy
 import threading
 import numpy as np
 import time
+import random
 from rclpy.node import Node
 from geometry_msgs.msg import Point, Pose2D
 from std_msgs.msg import String
@@ -391,134 +393,15 @@ class FossilExplorationNode(WorldROSWrapper):
             self.get_logger().info('Successfully reached base station')
             self.get_logger().info(f'Remaining fossils in queue: {len(self.collection_queue)}')
 
-def create_fossil_world():
-    world = World()
-
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    
-    world.set_metadata(
-        locations=os.path.join(current_dir, "fossil_location_data.yaml"),
-        objects=os.path.join(current_dir, "fossil_object_data.yaml"),
-    )
-
-    exploration_coords = [(-5, -5), (5, -5), (5, 5), (-5, 5)]
-    room = world.add_room(name="exploration_zone", footprint=exploration_coords, color=[0.8, 0.8, 0.8])
-
-    # Add base stationf
-    base = world.add_location(
-        name="base_station0",  # Explicit name
-        category="base_station",
-        parent="exploration_zone",
-        pose=Pose(x=0.0, y=0.0, yaw=0.0)
-    )
-
-    # Add fossils with explicit names
-    s0 = world.add_location(
-        name="fossil_site0",  # Explicit name
-        category="fossil_site",
-        parent="exploration_zone",
-        pose=Pose(x=3.0, y=3.0, yaw=0.0)
-    )
-
-    s1 = world.add_location(
-        name="fossil_site1",  # Explicit name
-        category="fossil_site",
-        parent="exploration_zone",
-        pose=Pose(x=-2.0, y=-2.0, yaw=0.0)
-    )
-    # o = Object(
-    #     name="fossil1",
-    #     category="fossil",
-    #     pose=Pose(x=1.0, y=1.0)
-    # )
-    world.add_object(
-        # object=o,
-        name="fossil1",
-        category="fossil",
-        # pose=Pose(x=1.0, y=1.0),
-        parent=s1
-    )
-    world.add_object(
-        # object=o,
-        name="fossil2",
-        category="fossil",
-        # pose=Pose(x=1.0, y=1.0),
-        parent=s1
-    )
-    world.add_object(
-        # object=o,
-        name="fossil3",
-        category="fossil",
-        # pose=Pose(x=1.0, y=1.0),
-        parent=s0
-    )
-
-    # world.add_object(
-    #     # object=o,
-    #     name="fossil2",
-    #     category="fossil",
-    #     # pose=Pose(x=1.0, y=1.0),
-    #     room=room,
-    # )
-
-    objspawn = ObjectSpawn(name="smtg", metadata={}, parent=s1)
-    # Example object with pose (no parent location)
-    obj_pose = Pose(x=1.0, y=1.0)  # Set the object's position in the room
-    new_object = Object(name="fossil2", category="fossil", pose=obj_pose, parent=objspawn)
-    # Add the object to the room
-    world.add_object(object=new_object)
-    # room.objects.append(new_object)
-
-    planner_config = {
-        "world": world,
-        "bidirectional": True,
-        "rrt_connect": False,
-        "rrt_star": True,
-        "collision_check_step_dist": 0.025,
-        "max_connection_dist": 0.5,
-        "rewire_radius": 2.0,
-        "compress_path": True
-    }
-    
-    # try rpmplanner
-    explorer_planner = RRTPlanner(**planner_config)
-    explorer = Robot(
-        name="explorer",
-        radius=0.2,
-        path_executor=ConstantVelocityExecutor(linear_velocity=0.7),
-        path_planner=explorer_planner,
-    )
-    world.add_robot(explorer, loc="exploration_zone")
-    
-    # Add robots
-    grasp_props = ParallelGraspProperties(
-        max_width=0.175,
-        depth=0.1,
-        height=0.04,
-        width_clearance=0.01,
-        depth_clearance=0.01,
-    )
-
-    collector_planner = RRTPlanner(**planner_config)
-    collector = Robot(
-        name="collector",
-        radius=0.2,
-        # height=1.0,
-        path_executor=ConstantVelocityExecutor(linear_velocity=0.8),
-        path_planner=collector_planner,
-        grasp_generator=GraspGenerator(grasp_props),
-    )
-    world.add_robot(collector, loc="exploration_zone")
-
-    return world
-
 
 if __name__ == "__main__":
     rclpy.init()
     
     node = FossilExplorationNode()
     
-    world = create_fossil_world()
+    # world = create_fossil_world(random_seed=random.randint(0, 100))
+    world = create_fossil_world(random_seed=1123)
+
     node.set_world(world)
     
     node.get_logger().info('Starting FossilExplorationNode')

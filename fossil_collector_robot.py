@@ -270,14 +270,17 @@ class ExplorerRobot(WorldROSWrapper):
             # if distance <= robot.get_known_objects:
             #     print(f"Robot can detect {obj.name}.")
 
-from fossil_demo import create_fossil_world
+from fossil_world_generation import create_fossil_world
 
 if __name__ == "__main__":
     rclpy.init()
     
     node = ExplorerRobot()
     
-    world = create_fossil_world()
+    world = create_fossil_world(
+        n_rocks=8,
+        random_seed=237
+    )
     node.set_world(world)
     
     node.get_logger().info('Starting FossilExplorationNode')
