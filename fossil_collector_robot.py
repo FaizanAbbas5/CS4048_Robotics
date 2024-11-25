@@ -11,6 +11,8 @@ import json
 from json import JSONDecodeError
 from pyrobosim.core import Robot, World, ObjectSpawn, Location
 from pyrobosim.core.objects import Object
+from pyrobosim.utils.knowledge import query_to_entity
+from pyrobosim.utils.motion import Path
 
 from pyrobosim.gui import start_gui
 from pyrobosim.navigation import ConstantVelocityExecutor, RRTPlanner
@@ -53,12 +55,32 @@ class CollectorRobot(WorldROSWrapper):
         self.collector_timer = self.create_timer(2.0, self.collector_behavior)
         self.is_holding_fossil = False
 
+        self.battery_timer = self.create_timer(2.0, self.battery_behavior)
 
         # Action client for a task plan
         self.plan_client = ActionClient(self, ExecuteTaskPlan, "execute_task_plan")
 
         self.first = True
 
+    def is_at_charger(self):
+        locs: list[Location] = world.get_locations(["charger"])
+        robot_pose = self.get_robot().get_pose()
+        for loc in locs:
+            for pose in loc.nav_poses:
+                # print("checking", pose)
+                if robot_pose.is_approx(pose):
+                    return True
+        return False
+
+    def battery_behavior(self, charge_rate: float=30.0, drain_rate: float=10.0):
+        robot = self.get_robot()
+
+        if self.is_at_charger():
+            robot.battery_level = min(robot.battery_level + charge_rate, 100.0)
+        else:
+            robot.battery_level = max(robot.battery_level - drain_rate, 0.0)
+        
+        world.gui.on_robot_changed()
 
     def fossil_discovery_callback(self, msg):
         """Handle new messages on fossil discovery topic."""
@@ -136,7 +158,39 @@ class CollectorRobot(WorldROSWrapper):
 
         return locations[min_index]
 
+    def get_plan_to_fossil(self, fossil_name: str) -> Path:
+        """Return path planned by robot's RRTPlanner."""
+        # get nearest navigable point to fossil
+        query_list = [elem for elem in fossil_name.split(" ") if elem]
+        goal = query_to_entity(
+            self.world,
+            query_list,
+            mode="location",
+            robot=self.get_robot(),
+            resolution_strategy="nearest",
+        )
+        goal_node = self.world.graph_node_from_entity(goal, robot=self.get_robot())
+
+        return self.get_plan_to_pose(goal_node.pose)
+
+    def get_plan_to_pose(self, goal_pose: Pose) -> Path:
+        """Return path planned by robot's RRTPlanner."""
+        planner: RRTPlanner = self.get_robot().path_planner
+        start = self.get_robot().get_pose()
+        plan = planner.plan(start, goal_pose)
+        return plan
+
+    def get_robot(self) -> Robot:
+        collector: Robot = self.world.get_robot_by_name(COLLECTOR)
+        return collector
+
     def collect_fossil_plan(self, fossil_obj_name: str):
+
+        # goal = Pose(x=goal.x, y=goal.y)
+        plan = self.get_plan_to_fossil(fossil_obj_name)
+        print("path:", plan)
+        return
+    
         actions = [
             TaskAction(type="navigate", target_location=fossil_obj_name),
             TaskAction(type="detect", object=fossil_obj_name),

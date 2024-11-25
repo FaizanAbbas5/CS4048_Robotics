@@ -121,6 +121,13 @@ def create_fossil_world(
         count=n_rocks,
         random_seed=random_seed + 3 * 42
     )
+    add_locations_to_room(
+        world,
+        room,
+        "charger",
+        count=2,
+        random_seed=random_seed + 3 * 42
+    )
         
 
     planner_config = {
@@ -147,7 +154,7 @@ def create_fossil_world(
     collector = Robot(
         name="collector",
         radius=0.2,
-        path_executor=ConstantVelocityExecutor(linear_velocity=0.5),
+        path_executor=ConstantVelocityExecutor(linear_velocity=1.0),
         path_planner=collector_planner,
     )
     world.add_robot(collector, loc="exploration_zone")
