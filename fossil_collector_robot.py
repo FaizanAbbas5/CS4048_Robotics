@@ -37,7 +37,7 @@ COLLECTOR = "collector"
 FOSSIL_DISCOVERIES_TOPIC = "fossil_discoveries"
 
 
-class ExplorerRobot(WorldROSWrapper):
+class CollectorRobot(WorldROSWrapper):
 
     def __init__(self):
         super().__init__(state_pub_rate=0.1, dynamics_rate=0.01)
@@ -275,7 +275,7 @@ from fossil_world_generation import create_fossil_world
 if __name__ == "__main__":
     rclpy.init()
     
-    node = ExplorerRobot()
+    node = CollectorRobot()
     
     world = create_fossil_world(
         n_rocks=8,
