@@ -3,11 +3,11 @@ base_station:
   description: Base station for robots
   footprint:
     type: circle
-    radius: 0.5
+    radius: 1
     height: 0.1
   nav_poses:
-    - [0, 1, -1.57]
-    - [0, -1, 1.57]
+    - [0, 1.5, -1.57]
+    - [0, -1.5, 1.57]
   locations:
     - name: "top"
       footprint:
