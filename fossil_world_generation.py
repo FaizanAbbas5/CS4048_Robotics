@@ -118,7 +118,7 @@ def create_fossil_world(
         world,
         room,
         "bush",
-        count=n_rocks,
+        count=n_bushes,
         random_seed=random_seed + 3 * 42
     )
     add_locations_to_room(
@@ -145,18 +145,18 @@ def create_fossil_world(
     explorer = Robot(
         name="explorer",
         radius=0.2,
-        path_executor=ConstantVelocityExecutor(linear_velocity=0.5),
+        path_executor=ConstantVelocityExecutor(linear_velocity=3.0),
         path_planner=explorer_planner,
     )
-    world.add_robot(explorer, loc="exploration_zone")
+    world.add_robot(explorer, loc="exploration_zone", pose=Pose(x=-4, y=0))
     
     collector_planner = RRTPlanner(**planner_config)
     collector = Robot(
         name="collector",
         radius=0.2,
-        path_executor=ConstantVelocityExecutor(linear_velocity=2.0),
+        path_executor=ConstantVelocityExecutor(linear_velocity=1.5),
         path_planner=collector_planner,
     )
-    world.add_robot(collector, loc="exploration_zone")
+    world.add_robot(collector, loc="exploration_zone", pose=Pose(x=4, y=0))
 
     return world

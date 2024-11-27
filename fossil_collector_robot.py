@@ -1,29 +1,23 @@
-import os
 import rclpy
 import threading
 import numpy as np
-import time
-from rclpy.node import Node
-from geometry_msgs.msg import Point, Pose2D
 from std_msgs.msg import String
 from rclpy.action import ActionClient
 import json
 from json import JSONDecodeError
-from pyrobosim.core import Robot, World, ObjectSpawn, Location
+from pyrobosim.core import Robot, ObjectSpawn, Location
 from pyrobosim.core.objects import Object
 from pyrobosim.utils.knowledge import query_to_entity
 from pyrobosim.utils.motion import Path
 
 from pyrobosim.gui import start_gui
-from pyrobosim.navigation import ConstantVelocityExecutor, RRTPlanner
+from pyrobosim.navigation import RRTPlanner
 from pyrobosim.utils.pose import Pose
 from pyrobosim.utils.general import get_data_folder
 from pyrobosim_ros.ros_interface import WorldROSWrapper
 from pyrobosim_msgs.msg import TaskAction, TaskPlan
 
-from pyrobosim_msgs.action import ExecuteTaskAction, ExecuteTaskPlan
-# from pyrobosim_msgs.msg import TaskAction, TaskPlan
-from pyrobosim_msgs.srv import RequestWorldState
+from pyrobosim_msgs.action import ExecuteTaskPlan
 
 from pyrobosim.planning.actions import TaskAction, TaskPlan
 
@@ -58,7 +52,7 @@ class CollectorRobot(WorldROSWrapper):
 
         self.is_holding_fossil = False
 
-        self.battery_timer = self.create_timer(2.0, self.battery_behavior)
+        self.battery_timer = self.create_timer(1.0, self.battery_behavior)
 
         self.base_station_timer = self.create_timer(1.0, self.base_station_behaviour)
 
@@ -78,7 +72,7 @@ class CollectorRobot(WorldROSWrapper):
         return collector
 
     def is_at_charger(self):
-        locs: list[Location] = world.get_locations(["charger"])
+        locs: list[Location] = self.world.get_locations(["charger"])
         robot_pose = self.get_robot().get_pose()
         for loc in locs:
             for pose in loc.nav_poses:
@@ -88,7 +82,7 @@ class CollectorRobot(WorldROSWrapper):
         return False
 
     def is_at_base(self):
-        locs: list[Location] = world.get_locations(["base_station"])
+        locs: list[Location] = self.world.get_locations(["base_station"])
         robot_pose = self.get_robot().get_pose()
         for loc in locs:
             for pose in loc.nav_poses:
@@ -123,6 +117,16 @@ class CollectorRobot(WorldROSWrapper):
         robot = self.get_robot()
         if self.is_at_base() and robot.manipulated_object is not None:
             robot.place_object()
+            self.collection_queue.pop(0)
+
+            try:
+                # self.go_to_fossil_safely(data["name"])
+
+                # g = Pose(x=-9.457152293593143, y=-6.258005503665991, z=0.00, q=[1.0, 0.0, 0.0, 0.0])
+                g = self.get_pickup_pose_for_object(self.collection_queue[0])
+                self.go_to_pose_through_charger(g)
+            except Exception as error:
+                self.get_logger().warn("Warning")
 
     def battery_behavior(self, charge_rate: float=10.0, drain_rate: float=10.0):
         robot = self.get_robot()
@@ -157,7 +161,7 @@ class CollectorRobot(WorldROSWrapper):
         #     robot.battery_level = max(self.battery.charge - drain_rate, 0.0)
         #     self.battery.charge = min(self.battery.charge - drain_rate, 0.0)
         
-        world.gui.on_robot_changed()
+        self.world.gui.on_robot_changed()
     
     def fossil_discovery_callback(self, msg):
         """Handle new messages on fossil discovery topic.
@@ -173,20 +177,24 @@ class CollectorRobot(WorldROSWrapper):
 
         if data["name"]:
             fossil_obj_name = data["name"]
+
+            if len(self.collection_queue) == 0:
+                try:
+                    # self.go_to_fossil_safely(data["name"])
+
+                    # g = Pose(x=-9.457152293593143, y=-6.258005503665991, z=0.00, q=[1.0, 0.0, 0.0, 0.0])
+                    g = self.get_pickup_pose_for_object(fossil_obj_name)
+                    self.go_to_pose_through_charger(g)
+                except Exception as error:
+                    self.get_logger().warn("Warning")
+
             self.collection_queue.append(fossil_obj_name)
             # parent: Location = world.get_object_by_name(data["name"]).parent
             # g = parent.nav_poses[0]
             # self.go_to_pose(g)
 
             # self.execute_collect_fossil_plan(data["name"])
-            try:
-                # self.go_to_fossil_safely(data["name"])
-
-                # g = Pose(x=-9.457152293593143, y=-6.258005503665991, z=0.00, q=[1.0, 0.0, 0.0, 0.0])
-                g = self.get_pickup_pose_for_object(fossil_obj_name)
-                self.go_to_pose_through_charger(g)
-            except Exception as error:
-                self.get_logger().warn("Warning")
+            
 
         if msg.data.startswith('FOSSIL_FOUND:'):
             x, y = map(float, msg.data.split(':')[1].split(','))
@@ -222,7 +230,7 @@ class CollectorRobot(WorldROSWrapper):
 
     def closest_location(self):
         robot: Robot = self.world.get_robot_by_name(COLLECTOR)
-        locations: list[Location] = world.get_locations()
+        locations: list[Location] = self.world.get_locations()
 
         print("collector pos", robot.get_pose())
         print("locations", len(locations), [l.pose for l in locations])
@@ -269,7 +277,7 @@ class CollectorRobot(WorldROSWrapper):
             TaskAction(type="place"),
         ]
         plan = TaskPlan(actions=actions)
-        robot = world.get_robot_by_name(COLLECTOR)
+        robot = self.world.get_robot_by_name(COLLECTOR)
         result, num_completed = robot.execute_plan(plan)
 
         self.get_logger().info(f"result: {num_completed}, {result.message}")
@@ -309,7 +317,7 @@ class CollectorRobot(WorldROSWrapper):
 
     def go_to_pose_through_charger(self, goal: Pose):
         path = self.get_plan_to_pose(goal)
-        robot = world.get_robot_by_name(COLLECTOR)
+        robot = self.world.get_robot_by_name(COLLECTOR)
 
         if self.is_safe_path(path):
             result = self.follow_path_with_drain(path)
@@ -323,7 +331,7 @@ class CollectorRobot(WorldROSWrapper):
         else:
             # go to charger on the way
             planner: RRTPlanner = robot.path_planner
-            path_to_charger, charger_location = self.battery.get_optimal_charger(robot.get_pose(), world, planner, goal=goal)
+            path_to_charger, charger_location = self.battery.get_optimal_charger(robot.get_pose(), self.world, planner, goal=goal)
             print("optimal charger:", charger_location)
 
             result = self.follow_path_with_drain(path_to_charger)
@@ -334,30 +342,11 @@ class CollectorRobot(WorldROSWrapper):
 
             # result = robot.follow_path(path_from_charger_to_goal)
 
-    def go_to_pose_safely(self, goal: Pose):
-        path = self.get_plan_to_pose(goal)
-        robot = world.get_robot_by_name(COLLECTOR)
-
-
-        if self.is_safe_path(path):
-            result = robot.follow_path(path)
-        else:
-            # go to charger on the way
-            planner: RRTPlanner = robot.path_planner
-            path_to_charger, charger_location = self.battery.get_optimal_charger(robot.get_pose(), world, planner, goal=goal)
-
-            result = robot.follow_path(path_to_charger)
-
-            path_from_charger_to_goal = planner.plan(path_to_charger.poses[path_to_charger.num_poses - 1], goal)
-
-            result = robot.follow_path(path_to_charger)
-
-
     def is_safe_path(self, path: Path) -> bool:
         """Returns whther the robot can complete path and then go to a charger worst case scenario."""
-        robot = world.get_robot_by_name(COLLECTOR)
+        robot = self.world.get_robot_by_name(COLLECTOR)
         goal_pose = path.poses[path.num_poses - 1]
-        path_to_charger, charger_location = self.battery.get_optimal_charger(goal_pose, world, robot.path_planner)
+        path_to_charger, charger_location = self.battery.get_optimal_charger(goal_pose, self.world, robot.path_planner)
 
         drain_path = self.battery.get_drain_for_path(path)
         drain_charger_path = self.battery.get_drain_for_path(path_to_charger)

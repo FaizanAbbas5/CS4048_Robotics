@@ -5,9 +5,11 @@ import threading
 import numpy as np
 import time
 import random
+import json
 from rclpy.node import Node
 from geometry_msgs.msg import Point, Pose2D
 from std_msgs.msg import String
+from rclpy.executors import MultiThreadedExecutor
 
 from typing import Optional, List, Tuple
 import math
@@ -23,6 +25,7 @@ from pyrobosim.navigation import ConstantVelocityExecutor, RRTPlanner
 from pyrobosim.utils.pose import Pose
 from pyrobosim.utils.general import get_data_folder
 from pyrobosim_ros.ros_interface import WorldROSWrapper
+from fossil_collector_robot import CollectorRobot
 
 class ExplorationGrid:
     def __init__(self, width, height, world=None, resolution=0.5):
@@ -390,7 +393,7 @@ class FossilExplorationNode(WorldROSWrapper):
         self.returning_to_base = False
         self.test_timer = self.create_timer(5.0, self.test_fossil_discovery)
         
-        self.collector_timer = self.create_timer(2.0, self.collector_behavior)
+        # self.collector_timer = self.create_timer(2.0, self.collector_behavior)
         self.fossil_discovery_sub = self.create_subscription(
             String,
             'fossil_discoveries',
@@ -479,9 +482,7 @@ class FossilExplorationNode(WorldROSWrapper):
                 if category == 'fossil_site_box':
                     if obj not in self.discovered_fossils:
                         self.discovered_fossils.add(obj)
-                        msg = String()
-                        msg.data = f"FOSSIL_FOUND:{obj.pose.x},{obj.pose.y}"
-                        self.fossil_discovery_pub.publish(msg)
+                        self.publish_fossil_object(obj)
                 
                 self.exploration_grid.add_object(obj.pose.x, obj.pose.y, category)
                 
@@ -489,6 +490,15 @@ class FossilExplorationNode(WorldROSWrapper):
                     self.get_logger().info(f'Obstacle dimensions: category={category}, position=({obj.pose.x:.2f}, {obj.pose.y:.2f})')
                     if hasattr(obj, 'footprint'):
                         self.get_logger().info(f'Footprint info: {obj.footprint}')
+
+    def publish_fossil_object(self, loc: Location):
+        msg = String()
+        data = {
+            "name": "fossil" + loc.name[-1:],
+        }
+        # msg.data = f"FOSSIL_FOUND:{obj.pose.x},{obj.pose.y}"
+        msg.data = json.dumps(data)
+        self.fossil_discovery_pub.publish(msg)
 
     def get_robot_by_name(self, name):
         for robot in self.world.robots:
@@ -578,9 +588,7 @@ class FossilExplorationNode(WorldROSWrapper):
                         
                 elif category == 'fossil_site_box' and obj not in self.discovered_fossils:
                     self.discovered_fossils.add(obj)
-                    msg = String()
-                    msg.data = f"FOSSIL_FOUND:{obj.pose.x},{obj.pose.y}"
-                    self.fossil_discovery_pub.publish(msg)
+                    self.publish_fossil_object(obj)
                     self.exploration_grid.add_object(obj.pose.x, obj.pose.y, category)
                 
                 self.exploration_grid.add_object(obj.pose.x, obj.pose.y, category)
@@ -852,19 +860,71 @@ class FossilExplorationNode(WorldROSWrapper):
             self.get_logger().info(f'Remaining fossils in queue: {len(self.collection_queue)}')
 
 
-if __name__ == "__main__":
+def main():
+    # Initialize ROS2
     rclpy.init()
-    
-    node = FossilExplorationNode()
-    
-    # world = create_fossil_world(random_seed=random.randint(0, 100))
-    world = create_fossil_world(random_seed=1123)
 
-    node.set_world(world)
-    
-    node.get_logger().info('Starting FossilExplorationNode')
+    # Create the world with a fixed random seed
+    world = create_fossil_world(
+        n_rocks=8,
+        n_bushes=4,
+        random_seed=237
+    )
 
-    ros_thread = threading.Thread(target=lambda: node.start(wait_for_gui=True))
+    # Create the nodes
+    exploration_node = FossilExplorationNode()
+    collector_node = CollectorRobot()
+
+    # Set the shared world for both nodes
+    exploration_node.set_world(world)
+    collector_node.set_world(world)
+
+    # Use a MultiThreadedExecutor for managing multiple nodes
+    executor = MultiThreadedExecutor()
+    executor.add_node(exploration_node)
+    executor.add_node(collector_node)
+
+    # Define a function to spin the ROS nodes
+    def spin_ros():
+        exploration_node.get_logger().info("Starting nodes...")
+        try:
+            executor.spin()
+        except KeyboardInterrupt:
+            exploration_node.get_logger().info("Shutting down nodes...")
+        finally:
+            executor.shutdown()
+            exploration_node.destroy_node()
+            collector_node.destroy_node()
+            rclpy.shutdown()
+
+    # Run the ROS nodes in a separate thread
+    ros_thread = threading.Thread(target=spin_ros, daemon=True)
     ros_thread.start()
 
-    start_gui(node.world)
+    # Start the GUI in the main thread
+    start_gui(world)
+
+
+if __name__ == "__main__":
+    main()
+    
+    # rclpy.init()
+    
+    # node = FossilExplorationNode()
+    # collector_node = CollectorRobot()
+
+    # # world = create_fossil_world(random_seed=random.randint(0, 100))
+    # world = create_fossil_world(random_seed=1123)
+
+    # node.set_world(world)
+    # collector_node.set_world(world)
+    
+    # node.get_logger().info('Starting FossilExplorationNode')
+
+    # ros_thread = threading.Thread(target=lambda: node.start(wait_for_gui=True))
+    # ros_thread.start()
+
+    # ros_thread2 = threading.Thread(target=lambda: collector_node.start(wait_for_gui=True))
+    # ros_thread2.start()
+
+    # start_gui(node.world)
