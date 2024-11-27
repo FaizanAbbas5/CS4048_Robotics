@@ -9,6 +9,10 @@ from rclpy.node import Node
 from geometry_msgs.msg import Point, Pose2D
 from std_msgs.msg import String
 
+from typing import Optional, List, Tuple
+import math
+from shapely.geometry import Point, LineString
+
 from pyrobosim.manipulation import GraspGenerator, ParallelGraspProperties
 
 from pyrobosim.core import Robot, World, ObjectSpawn, Location
@@ -20,10 +24,361 @@ from pyrobosim.utils.pose import Pose
 from pyrobosim.utils.general import get_data_folder
 from pyrobosim_ros.ros_interface import WorldROSWrapper
 
+class ExplorationGrid:
+    def __init__(self, width, height, world=None, resolution=0.5):
+        self.world = world
+        self.resolution = resolution
+        self.width = int(width / resolution)
+        self.height = int(height / resolution)
+        
+        # -1 = unknown, 0 = open space, 1 = obstacle
+        self.grid = np.full((self.width, self.height), -1)
+        
+        #Store object locations and types
+        self.object_locations = {}  # (x,y) -> {'type': type, 'certainty': value}
+        
+        #Track coverage and exploration
+        self.coverage_count = np.zeros((self.width, self.height))
+        self.last_visit_time = np.zeros((self.width, self.height))
+        self.current_time = 0
+        
+        #Track boundaries for valid exploration
+        self.world_bounds = {
+            'min_x': -width/2 + 1.0,  #Add margin from edge
+            'max_x': width/2 - 1.0,
+            'min_y': -height/2 + 1.0,
+            'max_y': height/2 - 1.0
+        }
+
+        self.exploration_mode = 'spiral'  #['spiral', 'wall_follow', 'parallel']
+        self.spiral_params = {
+            'angle': 0.0,
+            'radius': 1.0,
+            'step': 0.3,
+            'max_radius': min(width, height) / 3
+        }
+        self.parallel_params = {
+            'current_line': 0,
+            'line_spacing': 2.0,
+            'direction': 1  # 1 or -1
+        }
+        self.wall_follow_params = {
+            'wall_distance': 1.0,
+            'current_wall': None,  #Track which wall we're following
+            'follow_direction': 1  #1 for right wall, -1 for left wall
+        }
+
+
+    def set_world(self, world):
+        self.world = world
+
+    def update_cell(self, x, y, cell_type, certainty=1.0):
+        grid_x, grid_y = self.world_to_grid(x, y)
+        if 0 <= grid_x < self.width and 0 <= grid_y < self.height:
+            if cell_type == 'obstacle':
+                self.grid[grid_x, grid_y] = 1
+            elif cell_type == 'open':
+                self.grid[grid_x, grid_y] = 0
+            
+            self.current_time += 1
+            self.coverage_count[grid_x, grid_y] += 1
+            self.last_visit_time[grid_x, grid_y] = self.current_time
+
+    def add_object(self, x, y, obj_type, certainty=1.0):
+        grid_x, grid_y = self.world_to_grid(x, y)
+        key = (grid_x, grid_y)
+        self.object_locations[key] = {
+            'type': obj_type,
+            'certainty': certainty,
+            'world_x': x,
+            'world_y': y
+        }
+        self.update_cell(x, y, 'obstacle', certainty)
+
+    def is_valid_point(self, x, y):
+        return (self.world_bounds['min_x'] <= x <= self.world_bounds['max_x'] and
+                self.world_bounds['min_y'] <= y <= self.world_bounds['max_y'])
+
+    def get_exploration_direction(self, current_x, current_y):
+        grid_x, grid_y = self.world_to_grid(current_x, current_y)
+        
+        radius = 2
+        local_area_visits = 0
+        for dx in range(-radius, radius + 1):
+            for dy in range(-radius, radius + 1):
+                x, y = grid_x + dx, grid_y + dy
+                if 0 <= x < self.width and 0 <= y < self.height:
+                    local_area_visits += self.coverage_count[x, y]
+        
+        if local_area_visits > 10:
+            max_distance = 0
+            best_dir = None
+            
+            for x in range(self.width):
+                for y in range(self.height):
+                    if self.grid[x, y] == -1:
+                        distance = (x - grid_x)**2 + (y - grid_y)**2
+                        if distance > max_distance:
+                            world_x, world_y = self.grid_to_world(x, y)
+                            if self.is_valid_point(world_x, world_y):
+                                max_distance = distance
+                                best_dir = (x - grid_x, y - grid_y)
+            
+            if best_dir:
+                return best_dir
+        
+        unexplored_directions = []
+        for radius in range(1, 6):
+            for angle in np.linspace(0, 2*np.pi, 16):
+                dx = int(radius * np.cos(angle))
+                dy = int(radius * np.sin(angle))
+                new_x, new_y = grid_x + dx, grid_y + dy
+                
+                if (0 <= new_x < self.width and 
+                    0 <= new_y < self.height and 
+                    self.grid[new_x, new_y] == -1):
+
+                    world_x, world_y = self.grid_to_world(new_x, new_y)
+                    if self.is_valid_point(world_x, world_y):
+                        unexplored_directions.append((dx, dy))
+        
+        if unexplored_directions:
+            best_score = -1
+            best_dir = None
+            
+            for dx, dy in unexplored_directions:
+                x, y = grid_x + dx, grid_y + dy
+                unexplored_count = 0
+                
+                search_radius = 3
+                for sx in range(x - search_radius, x + search_radius + 1):
+                    for sy in range(y - search_radius, y + search_radius + 1):
+                        if (0 <= sx < self.width and 
+                            0 <= sy < self.height and 
+                            self.grid[sx, sy] == -1):
+                            unexplored_count += 1
+                
+                if unexplored_count > best_score:
+                    best_score = unexplored_count
+                    best_dir = (dx, dy)
+            
+            return best_dir
+        
+        return None
+
+    def mark_area_explored(self, center_x, center_y, radius=2.0):
+        grid_x, grid_y = self.world_to_grid(center_x, center_y)
+        radius_cells = int(radius / self.resolution)
+        
+        for dx in range(-radius_cells, radius_cells + 1):
+            for dy in range(-radius_cells, radius_cells + 1):
+                if dx*dx + dy*dy <= radius_cells*radius_cells:
+                    x, y = grid_x + dx, grid_y + dy
+                    if 0 <= x < self.width and 0 <= y < self.height:
+                        if self.grid[x, y] == -1:
+                            self.grid[x, y] = 0
+                            self.coverage_count[x, y] += 1
+
+    def world_to_grid(self, x, y):
+        grid_x = int((x + self.width * self.resolution / 2) / self.resolution)
+        grid_y = int((y + self.height * self.resolution / 2) / self.resolution)
+        return min(max(grid_x, 0), self.width - 1), min(max(grid_y, 0), self.height - 1)
+    
+    def grid_to_world(self, grid_x, grid_y):
+        world_x = grid_x * self.resolution - self.width * self.resolution / 2
+        world_y = grid_y * self.resolution - self.height * self.resolution / 2
+        return world_x, world_y
+
+    def get_spiral_target(self, current_x, current_y):
+        self.spiral_params['radius'] += self.spiral_params['step']
+        self.spiral_params['angle'] += math.pi / 8  # 22.5 degrees increment
+        
+        next_x = current_x + self.spiral_params['radius'] * math.cos(self.spiral_params['angle'])
+        next_y = current_y + self.spiral_params['radius'] * math.sin(self.spiral_params['angle'])
+        
+        if self.spiral_params['radius'] >= self.spiral_params['max_radius']:
+            self.exploration_mode = 'parallel'
+            self.spiral_params['radius'] = 1.0
+            self.spiral_params['angle'] = 0.0
+        
+        return next_x, next_y
+
+    def get_parallel_target(self, current_x, current_y):
+        line_y = -self.height/2 + self.parallel_params['current_line'] * self.parallel_params['line_spacing']
+        
+        if self.parallel_params['direction'] == 1:
+            target_x = self.world_bounds['max_x'] - 1.0
+        else:
+            target_x = self.world_bounds['min_x'] + 1.0
+        
+        if abs(current_x - target_x) < 1.0:
+            self.parallel_params['direction'] *= -1  # Reverse direction
+            self.parallel_params['current_line'] += 1  # Move to next line
+            
+            if self.parallel_params['current_line'] * self.parallel_params['line_spacing'] > self.height:
+                self.exploration_mode = 'wall_follow'
+        
+        return target_x, line_y
+
+    def get_wall_follow_target(self, current_x, current_y, obstacles):
+        if not obstacles:
+            return None, None
+        
+        nearest_obstacle = min(obstacles, key=lambda o: 
+            math.sqrt((o.pose.x - current_x)**2 + (o.pose.y - current_y)**2))
+        
+        angle = math.atan2(nearest_obstacle.pose.y - current_y, 
+                          nearest_obstacle.pose.x - current_x)
+        
+        target_x = nearest_obstacle.pose.x + (self.wall_follow_params['wall_distance'] * 
+                                            math.cos(angle + self.wall_follow_params['follow_direction'] * math.pi/2))
+        target_y = nearest_obstacle.pose.y + (self.wall_follow_params['wall_distance'] * 
+                                            math.sin(angle + self.wall_follow_params['follow_direction'] * math.pi/2))
+        
+        return target_x, target_y
+
+    def get_next_exploration_target(self, current_x, current_y):
+        if not self.is_valid_point(current_x, current_y):
+            self.exploration_mode = 'spiral'
+            return 0, 0
+        
+        obstacles = [loc for loc in self.world.locations if loc.category in ['rock', 'bush']]
+        
+        if self.exploration_mode == 'spiral':
+            next_x, next_y = self.get_spiral_target(current_x, current_y)
+        elif self.exploration_mode == 'parallel':
+            next_x, next_y = self.get_parallel_target(current_x, current_y)
+        elif self.exploration_mode == 'wall_follow':
+            next_x, next_y = self.get_wall_follow_target(current_x, current_y, obstacles)
+            if next_x is None:
+                self.exploration_mode = 'spiral'
+                next_x, next_y = self.get_spiral_target(current_x, current_y)
+        
+        next_x = max(min(next_x, self.world_bounds['max_x']), self.world_bounds['min_x'])
+        next_y = max(min(next_y, self.world_bounds['max_y']), self.world_bounds['min_y'])
+        
+        return next_x, next_y
+
+    def map_obstacle_boundary(self, obstacle_pose, obstacle_type):
+        if obstacle_type == 'rock':
+            radius = 1.25/2
+        elif obstacle_type == 'bush':
+            radius = 0.6
+        else:
+            radius = 0.3
+
+        grid_x, grid_y = self.world_to_grid(obstacle_pose.x, obstacle_pose.y)
+        radius_cells = int(radius / self.resolution)
+        
+        safety_margin = int(0.5 / self.resolution)
+        total_radius = radius_cells + safety_margin
+
+        for dx in range(-total_radius, total_radius + 1):
+            for dy in range(-total_radius, total_radius + 1):
+                dist = math.sqrt(dx*dx + dy*dy)
+                x, y = grid_x + dx, grid_y + dy
+                if 0 <= x < self.width and 0 <= y < self.height:
+                    if dist <= radius_cells:
+                        self.grid[x, y] = 1
+                    elif dist <= total_radius:
+                        if self.grid[x, y] != 1:
+                            self.grid[x, y] = 0.5
+
+    def is_path_clear(self, start_x, start_y, end_x, end_y):
+        start_grid_x, start_grid_y = self.world_to_grid(start_x, start_y)
+        end_grid_x, end_grid_y = self.world_to_grid(end_x, end_y)
+        
+        line_points = self.get_line_points(start_grid_x, start_grid_y, end_grid_x, end_grid_y)
+        
+        for x, y in line_points:
+            if 0 <= x < self.width and 0 <= y < self.height:
+                if self.grid[x, y] == 1:
+                    return False
+        return True
+
+    def get_line_points(self, x0, y0, x1, y1):
+        #Get all grid points along a line using Bresenham's algorithm
+        points = []
+        dx = abs(x1 - x0)
+        dy = abs(y1 - y0)
+        x, y = x0, y0
+        sx = 1 if x0 < x1 else -1
+        sy = 1 if y0 < y1 else -1
+        
+        if dx > dy:
+            err = dx / 2.0
+            while x != x1:
+                points.append((x, y))
+                err -= dy
+                if err < 0:
+                    y += sy
+                    err += dx
+                x += sx
+        else:
+            err = dy / 2.0
+            while y != y1:
+                points.append((x, y))
+                err -= dx
+                if err < 0:
+                    x += sx
+                    err += dy
+                y += sy
+                
+        points.append((x, y))
+        return points
+
+    def find_optimal_path(self, start_x, start_y, end_x, end_y, max_attempts=5):
+        if self.is_path_clear(start_x, start_y, end_x, end_y):
+            return [(end_x, end_y)]
+            
+        waypoints = []
+        current_x, current_y = start_x, start_y
+        
+        for _ in range(max_attempts):
+            blocked_point = self.find_blocking_point(current_x, current_y, end_x, end_y)
+            if blocked_point is None:
+                waypoints.append((end_x, end_y))
+                break
+                
+            bypass_point = self.find_bypass_point(current_x, current_y, blocked_point, end_x, end_y)
+            if bypass_point is None:
+                break
+                
+            waypoints.append(bypass_point)
+            current_x, current_y = bypass_point
+            
+            if self.is_path_clear(current_x, current_y, end_x, end_y):
+                waypoints.append((end_x, end_y))
+                break
+                
+        return waypoints
+
+    def find_blocking_point(self, start_x, start_y, end_x, end_y):
+        points = self.get_line_points(*self.world_to_grid(start_x, start_y), 
+                                    *self.world_to_grid(end_x, end_y))
+        
+        for x, y in points:
+            if 0 <= x < self.width and 0 <= y < self.height:
+                if self.grid[x, y] == 1:
+                    return self.grid_to_world(x, y)
+        return None
+
+    def find_bypass_point(self, start_x, start_y, blocked_point, end_x, end_y, radius=1.5):
+        for angle in np.linspace(0, 2*np.pi, 16):
+            test_x = blocked_point[0] + radius * math.cos(angle)
+            test_y = blocked_point[1] + radius * math.sin(angle)
+            
+            if self.is_valid_point(test_x, test_y) and \
+               self.is_path_clear(start_x, start_y, test_x, test_y):
+                return (test_x, test_y)
+                
+        return None
+
 class FossilExplorationNode(WorldROSWrapper):
     def __init__(self):
         super().__init__(state_pub_rate=0.1, dynamics_rate=0.01)
-        
+        self.exploration_grid = ExplorationGrid(width=20.0, height=20.0)
+
         self.explorer_timer = self.create_timer(2.0, self.explorer_behavior)
         self.explorer_exploring = False
         self.explorer_status_pub = self.create_publisher(String, 'explorer_status', 10)
@@ -45,7 +400,6 @@ class FossilExplorationNode(WorldROSWrapper):
         self.collection_queue = []
         self.collector_busy = False
 
-        # Add tracking for collected fossils
         self.collected_fossils = []
 
         self.get_logger().info(r'''
@@ -67,7 +421,6 @@ class FossilExplorationNode(WorldROSWrapper):
                 path = robot.path_planner.plan(start_pose, goal_pose)
                 if path is not None:
                     return path
-                # If path is None, try with slightly modified goal
                 offset = 0.2 * (attempt + 1)
                 modified_goal = Pose(
                     x=goal_pose.x + np.random.uniform(-offset, offset),
@@ -82,6 +435,10 @@ class FossilExplorationNode(WorldROSWrapper):
                 continue
         return None
 
+    def set_world(self, world):
+        super().set_world(world)
+        self.exploration_grid.set_world(world)
+
     def collect_fossil(self, fossil, collector):
         if not hasattr(fossil, 'pose'):
             return False
@@ -92,19 +449,15 @@ class FossilExplorationNode(WorldROSWrapper):
             self.get_logger().info(f"Collected fossil at ({success})")
             return success
 
-            # Store the fossil's original pose
             fossil.original_pose = Pose(
                 x=fossil.pose.x,
                 y=fossil.pose.y,
                 yaw=fossil.pose.yaw
             )
             
-            # Update the fossil's pose to match the collector's position
-            # Offset slightly to make it visible
             fossil.pose.x = collector.get_pose().x
             fossil.pose.y = collector.get_pose().y
             
-            # Add to collected fossils list
             self.collected_fossils.append(fossil)
             
             self.get_logger().info(f"Collected fossil at ({fossil.original_pose.x:.2f}, {fossil.original_pose.y:.2f})")
@@ -114,116 +467,225 @@ class FossilExplorationNode(WorldROSWrapper):
             self.get_logger().error(f"Error collecting fossil: {str(e)}")
             return False
 
+    def check_along_path(self, explorer):
+        current_pose = explorer.get_pose()
+        
+        detected_objects = self.check_for_objects(current_pose)
+        
+        if detected_objects:
+            for obj, category in detected_objects:
+                self.get_logger().info(f'Found {category} while moving at ({obj.pose.x:.2f}, {obj.pose.y:.2f})')
+                
+                if category == 'fossil_site_box':
+                    if obj not in self.discovered_fossils:
+                        self.discovered_fossils.add(obj)
+                        msg = String()
+                        msg.data = f"FOSSIL_FOUND:{obj.pose.x},{obj.pose.y}"
+                        self.fossil_discovery_pub.publish(msg)
+                
+                self.exploration_grid.add_object(obj.pose.x, obj.pose.y, category)
+                
+                if category in ['rock', 'bush']:
+                    self.get_logger().info(f'Obstacle dimensions: category={category}, position=({obj.pose.x:.2f}, {obj.pose.y:.2f})')
+                    if hasattr(obj, 'footprint'):
+                        self.get_logger().info(f'Footprint info: {obj.footprint}')
+
     def get_robot_by_name(self, name):
         for robot in self.world.robots:
             if robot.name == name:
                 return robot
         return None
 
+    def get_unstuck_position(self, current_pose, search_radius=2.0, increments=8):
+        for radius in np.arange(0.5, search_radius, 0.5):
+            for angle in np.linspace(0, 2*np.pi, increments):
+                test_x = current_pose.x + radius * math.cos(angle)
+                test_y = current_pose.y + radius * math.sin(angle)
+                
+                if self.exploration_grid.is_valid_point(test_x, test_y) and \
+                   self.exploration_grid.is_path_clear(current_pose.x, current_pose.y, test_x, test_y):
+                    return test_x, test_y
+                    
+        return None, None
+
     def explorer_behavior(self):
         if not hasattr(self, 'world'):
-            self.get_logger().warn('World not yet initialized')
             return
                 
         explorer = self.get_robot_by_name('explorer')
         if explorer is None:
-            self.get_logger().warn('Explorer robot not found')
             return
-        
+
         current_pose = explorer.get_pose()
         
-        # Print current position periodically
-        self.get_logger().debug(f"Explorer at ({current_pose.x:.2f}, {current_pose.y:.2f})")
-        
-        fossil_site = self.check_for_fossils(current_pose)
-        obj = self.get_first_object()
-
-        if obj is not None:
-            msg = String()
-            msg.data = f"FOSSIL_FOUND:{fossil_site.pose.x},{fossil_site.pose.y}"
-            self.fossil_discovery_pub.publish(msg)
-        
-        # if fossil_site is not None and fossil_site not in self.discovered_fossils:
-        #     self.discovered_fossils.add(fossil_site)
+        if not explorer.is_moving():
+            next_x, next_y = self.exploration_grid.get_next_exploration_target(
+                current_pose.x, current_pose.y
+            )
             
-        #     msg = String()
-        #     msg.data = f"FOSSIL_FOUND:{fossil_site.pose.x},{fossil_site.pose.y}"
-        #     self.fossil_discovery_pub.publish(msg)
-            
-        #     self.get_logger().info(f'Found fossil at ({fossil_site.pose.x:.2f}, {fossil_site.pose.y:.2f})')
+            if next_x is not None and next_y is not None:
+                waypoints = self.exploration_grid.find_optimal_path(
+                    current_pose.x, current_pose.y, next_x, next_y
+                )
                 
-        if not self.explorer_exploring:
-            # Keep explorer away from the edges
-            margin = 0.5  # Stay 0.5 units away from edges
-            x = np.random.uniform(-4 + margin, 4 - margin)
-            y = np.random.uniform(-4 + margin, 4 - margin)
-            
-            self.get_logger().info(f'Planning move to ({x:.2f}, {y:.2f})')
-            
-            goal_pose = Pose(x=x, y=y)
-            path = self.safe_plan_path(explorer, explorer.get_pose(), goal_pose)
-            
-            if path is not None:
-                explorer.follow_path(path)
-                status_msg = String()
-                status_msg.data = f'Moving to ({x:.2f}, {y:.2f})'
-                self.explorer_status_pub.publish(status_msg)
-                self.explorer_exploring = True
-                self.get_logger().info('Started moving to target')
+                if waypoints:
+                    for wx, wy in waypoints:
+                        goal_pose = Pose(x=wx, y=wy)
+                        path = self.safe_plan_path(explorer, explorer.get_pose(), goal_pose)
+                        
+                        if path is not None:
+                            explorer.follow_path(path)
+                            self.get_logger().info(
+                                f'Moving to waypoint ({wx:.2f}, {wy:.2f}) '
+                                f'in {self.exploration_grid.exploration_mode} mode'
+                            )
+                            break
+                else:
+                    self.get_logger().info('Attempting to get unstuck...')
+                    unstuck_x, unstuck_y = self.get_unstuck_position(current_pose)
+                    
+                    if unstuck_x is not None:
+                        goal_pose = Pose(x=unstuck_x, y=unstuck_y)
+                        path = self.safe_plan_path(explorer, explorer.get_pose(), goal_pose)
+                        
+                        if path is not None:
+                            explorer.follow_path(path)
+                            self.get_logger().info(f'Moving to clear position at ({unstuck_x:.2f}, {unstuck_y:.2f})')
+                            return
+                    
+                    self.get_logger().warn('Unable to find clear path, switching exploration mode')
+                    if self.exploration_grid.exploration_mode == 'spiral':
+                        self.exploration_grid.exploration_mode = 'parallel'
+                    elif self.exploration_grid.exploration_mode == 'parallel':
+                        self.exploration_grid.exploration_mode = 'wall_follow'
+                    else:
+                        self.exploration_grid.exploration_mode = 'spiral'
+                        self.exploration_grid.spiral_params['radius'] = 1.0
+                        self.exploration_grid.spiral_params['angle'] = 0.0
             else:
-                self.get_logger().warn('Failed to plan path to target position after multiple attempts')
-        else:
-            if not explorer.is_moving():
-                self.explorer_exploring = False
-                status_msg = String()
-                status_msg.data = 'Reached destination, planning next move'
-                self.explorer_status_pub.publish(status_msg)
-                self.get_logger().info('Reached destination')
-    
+                self.get_logger().info('No unexplored areas found, reviewing coverage...')
+        
+        detected_objects = self.check_for_objects(current_pose)
+        if detected_objects:
+            for obj, category in detected_objects:
+                self.get_logger().info(f'Detected {category} at ({obj.pose.x:.2f}, {obj.pose.y:.2f})')
+                
+                if category in ['rock', 'bush']:
+                    self.exploration_grid.map_obstacle_boundary(obj.pose, category)
+                    self.get_logger().info(f'Mapped {category} boundary at ({obj.pose.x:.2f}, {obj.pose.y:.2f})')
+                    if hasattr(obj, 'footprint'):
+                        self.get_logger().info(f'Obstacle footprint: {obj.footprint}')
+                        
+                elif category == 'fossil_site_box' and obj not in self.discovered_fossils:
+                    self.discovered_fossils.add(obj)
+                    msg = String()
+                    msg.data = f"FOSSIL_FOUND:{obj.pose.x},{obj.pose.y}"
+                    self.fossil_discovery_pub.publish(msg)
+                    self.exploration_grid.add_object(obj.pose.x, obj.pose.y, category)
+                
+                self.exploration_grid.add_object(obj.pose.x, obj.pose.y, category)
+        
+        if explorer.is_moving():
+            self.check_along_path(explorer)
+            
+            self.exploration_grid.mark_area_explored(current_pose.x, current_pose.y)
+            
+            if detected_objects:
+                found_obstacle = False
+                for obj, category in detected_objects:
+                    if category in ['rock', 'bush']:
+                        found_obstacle = True
+                        break
+                
+                if found_obstacle:
+                    next_waypoint = explorer.get_current_goal()
+                    if next_waypoint:
+                        if not self.exploration_grid.is_path_clear(
+                            current_pose.x, current_pose.y,
+                            next_waypoint.x, next_waypoint.y
+                        ):
+                            self.get_logger().info('Obstacle detected on path, replanning...')
+                            explorer.cancel_actions()
+
     def get_first_object(self):
         fossil_objects: list[Object] = [obj for obj in self.world.objects if obj.category == 'fossil']
         if len(fossil_objects) > 0:
             first = fossil_objects[0]
             return first
 
-    def check_for_fossils(self, robot_pose, detection_radius=0.5):
+    def check_line_of_sight(self, start_x, start_y, end_x, end_y, obstacles):
+        for obstacle in obstacles:
+            line = LineString([(start_x, start_y), (end_x, end_y)])
+            
+            if hasattr(obstacle, 'polygon') and obstacle.polygon.intersects(line):
+                return False
+            
+            if hasattr(obstacle, 'pose'):
+                obstacle_point = Point(obstacle.pose.x, obstacle.pose.y)
+                if line.distance(obstacle_point) < 0.6:
+                    return False
+        return True
+
+    def check_for_objects(self, robot_pose, detection_params={
+            'radius': 3.0,
+            'min_probability': 0.4,
+            'n_rays': 64,
+            'scan_interval': 0.2
+        }):
         if not hasattr(self, 'world'):
             return None
+
+        fossil_sites = [loc for loc in self.world.locations if loc.category == 'fossil_site_box']
+        static_obstacles = [loc for loc in self.world.locations if loc.category in ['rock', 'bush']]
         
         robot = self.get_robot_by_name("explorer")
-        success = robot.detect_objects("fossil1")
-    
-        fossil_sites = [loc for loc in self.world.locations if loc.category == 'fossil_site']
-        
+        detected_objects = []
 
-        # Debug print all fossil sites
-        self.get_logger().debug(f"All fossil sites: {[(site.category, site.pose.x, site.pose.y) for site in fossil_sites]}")
-        
-        for site in fossil_sites:
-            dx = site.pose.x - robot_pose.x
-            dy = site.pose.y - robot_pose.y
-            distance = np.sqrt(dx*dx + dy*dy)
+        scan_points = []
+        for radius in np.arange(0, detection_params['radius'], detection_params['scan_interval']):
+            angles = np.linspace(0, 2*np.pi, detection_params['n_rays'])
+            for angle in angles:
+                x = robot_pose.x + radius * np.cos(angle)
+                y = robot_pose.y + radius * np.sin(angle)
+                scan_points.append((x, y))
+
+        for obj in fossil_sites + static_obstacles:
+            best_visibility = 0
+            closest_distance = float('inf')
             
-            if distance < detection_radius:
-                return site
-        return None
+            obj_radius = 0.15 if obj.category == 'fossil_site_box' else 0.6
+            
+            for scan_x, scan_y in scan_points:
+                dx = obj.pose.x - scan_x
+                dy = obj.pose.y - scan_y
+                distance = math.sqrt(dx*dx + dy*dy)
+                
+                if distance <= detection_params['radius']:
+                    if self.check_line_of_sight(scan_x, scan_y, obj.pose.x, obj.pose.y, static_obstacles):
+                        visibility = 1.0 - (distance / detection_params['radius'])
+                        best_visibility = max(best_visibility, visibility)
+                        closest_distance = min(closest_distance, distance)
+
+            if best_visibility >= detection_params['min_probability']:
+                self.get_logger().info(f'Detected {obj.category} at ({obj.pose.x:.2f}, {obj.pose.y:.2f}) '
+                                     f'with visibility {best_visibility:.2f} at distance {closest_distance:.2f}')
+                detected_objects.append((obj, obj.category))
+
+        return detected_objects
 
     def get_valid_collection_pose(self, fossil_x, fossil_y, robot, approach_radius=0.8):
         current_pose = robot.get_pose()
         self.get_logger().info(f"Robot at ({current_pose.x:.2f}, {current_pose.y:.2f}), trying to reach fossil at ({fossil_x:.2f}, {fossil_y:.2f})")
         
-        # Try different radii if needed
         for radius in [0.8, 1.0, 1.2]:
-            angles = np.linspace(0, 2*np.pi, 16)  # Try 16 positions around the fossil
+            angles = np.linspace(0, 2*np.pi, 16)
             
             for i, angle in enumerate(angles):
-                # Calculate position at radius from fossil
                 x = fossil_x + radius * np.cos(angle)
                 y = fossil_y + radius * np.sin(angle)
                 
                 self.get_logger().debug(f"Trying approach position {i+1}/16 at ({x:.2f}, {y:.2f}) with radius {radius}")
                 
-                # Try to plan a path to this position
                 goal_pose = Pose(x=x, y=y)
                 path = self.safe_plan_path(robot, robot.get_pose(), goal_pose)
                 
@@ -238,11 +700,10 @@ class FossilExplorationNode(WorldROSWrapper):
         current_pose = robot.get_pose()
         self.get_logger().info(f"Robot at ({current_pose.x:.2f}, {current_pose.y:.2f}), trying to find path to base")
         
-        angles = np.linspace(0, 2*np.pi, 16)  # Try 16 positions around the base
+        angles = np.linspace(0, 2*np.pi, 16)
         
-        for radius in [0.8, 1.0, 1.2]:  # Start with minimum safe distance
+        for radius in [0.8, 1.0, 1.2]:
             for i, angle in enumerate(angles):
-                # Calculate position at radius from base
                 x = radius * np.cos(angle)
                 y = radius * np.sin(angle)
                 
@@ -271,56 +732,49 @@ class FossilExplorationNode(WorldROSWrapper):
             
             if distance < radius:
                 try:
-                    # Get the location ID
                     location_id = site.name if hasattr(site, 'name') else None
                     self.get_logger().info(f"Attempting to remove fossil with ID: {location_id}")
                     
-                    # Try to remove using the world's remove_location method
                     if hasattr(self.world, 'remove_location'):
                         self.world.remove_location(location_id)
                         self.get_logger().info(f"Removed fossil {location_id} at ({x:.2f}, {y:.2f}) using remove_location")
                     else:
-                        # Fallback: try to remove from locations list
                         self.world.locations.remove(site)
                         self.get_logger().info(f"Removed fossil at ({x:.2f}, {y:.2f}) from locations list")
                     
-                    # Update any internal tracking
                     if site in self.discovered_fossils:
                         self.discovered_fossils.remove(site)
-                    
-                    # Force a world state update if possible
                     if hasattr(self, 'publish_state'):
                         self.publish_state()
                         
                     return True
                 except Exception as e:
                     self.get_logger().error(f"Error removing fossil: {str(e)}")
-                    self.get_logger().error(f"Location properties: {dir(site)}")  # Debug info
+                    self.get_logger().error(f"Location properties: {dir(site)}")  #Debug info
                     return False
                 
         return False
 
     def test_fossil_discovery(self):
-        if not self.test_done:  # Only trigger once
+        if not self.test_done:
             msg = String()
-            msg.data = "FOSSIL_FOUND:3.0,3.0"  # Test coordinates
+            msg.data = "FOSSIL_FOUND:3.0,3.0"
             self.fossil_discovery_pub.publish(msg)
             self.get_logger().info("Manually triggered fossil discovery at (3.0, 3.0)")
-            self.test_done = True  # Prevent further triggers
+            self.test_done = True
 
     def fossil_discovery_callback(self, msg):
         if msg.data.startswith('FOSSIL_FOUND:'):
             x, y = map(float, msg.data.split(':')[1].split(','))
-            if (x, y) not in [(loc[0], loc[1]) for loc in self.collection_queue]:  # Prevent duplicates
+            if (x, y) not in [(loc[0], loc[1]) for loc in self.collection_queue]:
                 self.collection_queue.append((x, y))
                 self.get_logger().info(f'Added fossil at ({x}, {y}) to collection queue')
 
     def deposit_fossils_at_base(self, collector):
         for fossil in self.collected_fossils:
             try:
-                # Place fossils in a circle around the base
                 angle = len(self.collected_fossils) * (2 * np.pi / max(len(self.collected_fossils), 1))
-                deposit_radius = 0.3  # Distance from base center
+                deposit_radius = 0.3
                 
                 fossil.pose.x = deposit_radius * np.cos(angle)
                 fossil.pose.y = deposit_radius * np.sin(angle)
@@ -330,7 +784,6 @@ class FossilExplorationNode(WorldROSWrapper):
             except Exception as e:
                 self.get_logger().error(f"Error depositing fossil: {str(e)}")
         
-        # Clear the collected fossils list
         self.collected_fossils = []
 
     def collector_behavior(self):
@@ -342,10 +795,8 @@ class FossilExplorationNode(WorldROSWrapper):
             return
         
         if not self.collector_busy and not self.returning_to_base and self.collection_queue:
-            # Moving to fossil
             x, y = self.collection_queue[0]
             
-            # Get a valid pose near the fossil
             goal_pose = self.get_valid_collection_pose(x, y, collector)
             
             if goal_pose is not None:
@@ -361,17 +812,15 @@ class FossilExplorationNode(WorldROSWrapper):
                 self.collection_queue.append(self.collection_queue.pop(0))
         
         elif self.collector_busy and not collector.is_moving():
-            # At fossil location, collect fossil and plan return to base
             if self.collection_queue:
                 x, y = self.collection_queue.pop(0)
                 
-                # Find and collect the fossil
                 fossil_objects = [obj for obj in self.world.objects if obj.category == 'fossil']
                 for fossil in fossil_objects:
                     dx = fossil.pose.x - x
                     dy = fossil.pose.y - y
                     distance = np.sqrt(dx*dx + dy*dy)
-                    if distance < 0.3:  # Collection radius
+                    if distance < 0.3:
                         self.collect_fossil(fossil, collector)
                         break
                 
@@ -379,7 +828,6 @@ class FossilExplorationNode(WorldROSWrapper):
             self.returning_to_base = True
             self.get_logger().info('Fossil collected, planning return to base')
             
-            # Try to find a valid return pose near base
             goal_pose = self.get_valid_base_pose(collector)
             
             if goal_pose is not None:
@@ -395,9 +843,8 @@ class FossilExplorationNode(WorldROSWrapper):
                 self.returning_to_base = False
         
         elif self.returning_to_base and not collector.is_moving():
-            time.sleep(0.5)  # Small delay to ensure we've reached position
+            time.sleep(0.5)
             
-            # Deposit fossils at base
             self.deposit_fossils_at_base(collector)
             
             self.returning_to_base = False
