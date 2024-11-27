@@ -154,7 +154,7 @@ def create_fossil_world(
     collector = Robot(
         name="collector",
         radius=0.2,
-        path_executor=ConstantVelocityExecutor(linear_velocity=3.0),
+        path_executor=ConstantVelocityExecutor(linear_velocity=2.0),
         path_planner=collector_planner,
     )
     world.add_robot(collector, loc="exploration_zone")
