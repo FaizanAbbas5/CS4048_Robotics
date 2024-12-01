@@ -26,6 +26,8 @@ from pyrobosim.utils.pose import Pose
 from pyrobosim.utils.general import get_data_folder
 from pyrobosim_ros.ros_interface import WorldROSWrapper
 from fossil_collector_robot import CollectorRobot
+from charging_coordinator import ChargingCoordinator
+from explorer_battery_manager import ExplorerBatteryManager
 
 class ExplorationGrid:
     def __init__(self, width, height, world=None, resolution=0.5):
@@ -71,6 +73,10 @@ class ExplorationGrid:
             'follow_direction': 1  #1 for right wall, -1 for left wall
         }
 
+        self.stuck_count = 0
+        self.MAX_STUCK_COUNT = 5
+        self.failed_targets = set()  #Keep track of unreachable targets
+
 
     def set_world(self, world):
         self.world = world
@@ -105,73 +111,45 @@ class ExplorationGrid:
     def get_exploration_direction(self, current_x, current_y):
         grid_x, grid_y = self.world_to_grid(current_x, current_y)
         
+        local_coverage_threshold = 5
         radius = 2
         local_area_visits = 0
+        
         for dx in range(-radius, radius + 1):
             for dy in range(-radius, radius + 1):
                 x, y = grid_x + dx, grid_y + dy
                 if 0 <= x < self.width and 0 <= y < self.height:
                     local_area_visits += self.coverage_count[x, y]
         
-        if local_area_visits > 10:
-            max_distance = 0
+        if local_area_visits > local_coverage_threshold:
+            #Look for less-visited areas
+            best_score = float('inf')
             best_dir = None
+            search_radius = 5
             
-            for x in range(self.width):
-                for y in range(self.height):
-                    if self.grid[x, y] == -1:
-                        distance = (x - grid_x)**2 + (y - grid_y)**2
-                        if distance > max_distance:
+            for dx in range(-search_radius, search_radius + 1):
+                for dy in range(-search_radius, search_radius + 1):
+                    x, y = grid_x + dx, grid_y + dy
+                    if 0 <= x < self.width and 0 <= y < self.height:
+                        coverage_score = self.coverage_count[x, y]
+                        time_factor = (self.current_time - self.last_visit_time[x, y]) / 100.0
+                        combined_score = coverage_score - time_factor
+                        
+                        if combined_score < best_score:
                             world_x, world_y = self.grid_to_world(x, y)
                             if self.is_valid_point(world_x, world_y):
-                                max_distance = distance
-                                best_dir = (x - grid_x, y - grid_y)
-            
-            if best_dir:
-                return best_dir
-        
-        unexplored_directions = []
-        for radius in range(1, 6):
-            for angle in np.linspace(0, 2*np.pi, 16):
-                dx = int(radius * np.cos(angle))
-                dy = int(radius * np.sin(angle))
-                new_x, new_y = grid_x + dx, grid_y + dy
-                
-                if (0 <= new_x < self.width and 
-                    0 <= new_y < self.height and 
-                    self.grid[new_x, new_y] == -1):
-
-                    world_x, world_y = self.grid_to_world(new_x, new_y)
-                    if self.is_valid_point(world_x, world_y):
-                        unexplored_directions.append((dx, dy))
-        
-        if unexplored_directions:
-            best_score = -1
-            best_dir = None
-            
-            for dx, dy in unexplored_directions:
-                x, y = grid_x + dx, grid_y + dy
-                unexplored_count = 0
-                
-                search_radius = 3
-                for sx in range(x - search_radius, x + search_radius + 1):
-                    for sy in range(y - search_radius, y + search_radius + 1):
-                        if (0 <= sx < self.width and 
-                            0 <= sy < self.height and 
-                            self.grid[sx, sy] == -1):
-                            unexplored_count += 1
-                
-                if unexplored_count > best_score:
-                    best_score = unexplored_count
-                    best_dir = (dx, dy)
+                                best_score = combined_score
+                                best_dir = (dx, dy)
             
             return best_dir
         
-        return None
+        return super().get_exploration_direction(current_x, current_y)
 
     def mark_area_explored(self, center_x, center_y, radius=2.0):
         grid_x, grid_y = self.world_to_grid(center_x, center_y)
         radius_cells = int(radius / self.resolution)
+        
+        coverage_increment = 0.5
         
         for dx in range(-radius_cells, radius_cells + 1):
             for dy in range(-radius_cells, radius_cells + 1):
@@ -180,7 +158,8 @@ class ExplorationGrid:
                     if 0 <= x < self.width and 0 <= y < self.height:
                         if self.grid[x, y] == -1:
                             self.grid[x, y] = 0
-                            self.coverage_count[x, y] += 1
+                        self.coverage_count[x, y] += coverage_increment
+                        self.last_visit_time[x, y] = self.current_time
 
     def world_to_grid(self, x, y):
         grid_x = int((x + self.width * self.resolution / 2) / self.resolution)
@@ -194,8 +173,8 @@ class ExplorationGrid:
 
     def get_spiral_target(self, current_x, current_y):
         self.spiral_params['radius'] += self.spiral_params['step']
-        self.spiral_params['angle'] += math.pi / 8  # 22.5 degrees increment
-        
+        self.spiral_params['angle'] += math.pi / 8
+
         next_x = current_x + self.spiral_params['radius'] * math.cos(self.spiral_params['angle'])
         next_y = current_y + self.spiral_params['radius'] * math.sin(self.spiral_params['angle'])
         
@@ -215,8 +194,8 @@ class ExplorationGrid:
             target_x = self.world_bounds['min_x'] + 1.0
         
         if abs(current_x - target_x) < 1.0:
-            self.parallel_params['direction'] *= -1  # Reverse direction
-            self.parallel_params['current_line'] += 1  # Move to next line
+            self.parallel_params['direction'] *= -1
+            self.parallel_params['current_line'] += 1
             
             if self.parallel_params['current_line'] * self.parallel_params['line_spacing'] > self.height:
                 self.exploration_mode = 'wall_follow'
@@ -240,22 +219,75 @@ class ExplorationGrid:
         
         return target_x, target_y
 
+    def is_target_valid(self, x, y):
+        if not self.is_valid_point(x, y):
+            return False
+            
+        grid_x, grid_y = self.world_to_grid(x, y)
+        if (grid_x, grid_y) in self.failed_targets:
+            return False
+            
+        if self.grid[grid_x][grid_y] == 1:
+            return False
+            
+        return True
+
     def get_next_exploration_target(self, current_x, current_y):
         if not self.is_valid_point(current_x, current_y):
-            self.exploration_mode = 'spiral'
             return 0, 0
         
-        obstacles = [loc for loc in self.world.locations if loc.category in ['rock', 'bush']]
+        unexplored_count = 0
+        total_cells = 0
+        for x in range(self.width):
+            for y in range(self.height):
+                if self.is_valid_point(*self.grid_to_world(x, y)):
+                    total_cells += 1
+                    if self.grid[x][y] == -1:
+                        unexplored_count += 1
         
-        if self.exploration_mode == 'spiral':
-            next_x, next_y = self.get_spiral_target(current_x, current_y)
-        elif self.exploration_mode == 'parallel':
-            next_x, next_y = self.get_parallel_target(current_x, current_y)
-        elif self.exploration_mode == 'wall_follow':
-            next_x, next_y = self.get_wall_follow_target(current_x, current_y, obstacles)
-            if next_x is None:
-                self.exploration_mode = 'spiral'
+        exploration_ratio = (1 - (unexplored_count / total_cells)) * 1.92
+        
+        if exploration_ratio >= 0.95:
+            if not (abs(current_x) < 0.5 and abs(current_y) < 0.5):
+                return 0, 0
+            else:
+                return current_x, current_y
+        
+        next_x, next_y = None, None
+        
+        if self.stuck_count >= self.MAX_STUCK_COUNT:
+            self.stuck_count = 0
+            self.exploration_mode = 'spiral'
+            self.spiral_params['radius'] = 1.0
+            self.spiral_params['angle'] = 0.0
+            return 0, 0
+        
+        for _ in range(5):
+            if self.exploration_mode == 'spiral':
                 next_x, next_y = self.get_spiral_target(current_x, current_y)
+            elif self.exploration_mode == 'parallel':
+                next_x, next_y = self.get_parallel_target(current_x, current_y)
+            elif self.exploration_mode == 'wall_follow':
+                obstacles = [loc for loc in self.world.locations if loc.category in ['rock', 'bush']]
+                next_x, next_y = self.get_wall_follow_target(current_x, current_y, obstacles)
+                if next_x is None:
+                    self.exploration_mode = 'spiral'
+                    continue
+            
+            if next_x is not None and next_y is not None:
+                if self.is_target_valid(next_x, next_y):
+                    break
+                else:
+                    grid_x, grid_y = self.world_to_grid(next_x, next_y)
+                    self.failed_targets.add((grid_x, grid_y))
+            
+            if self.exploration_mode == 'spiral':
+                self.spiral_params['radius'] += self.spiral_params['step']
+            elif self.exploration_mode == 'parallel':
+                self.parallel_params['current_line'] += 1
+        
+        if next_x is None or next_y is None:
+            return 0, 0
         
         next_x = max(min(next_x, self.world_bounds['max_x']), self.world_bounds['min_x'])
         next_y = max(min(next_y, self.world_bounds['max_y']), self.world_bounds['min_y'])
@@ -377,12 +409,17 @@ class ExplorationGrid:
                 
         return None
 
+
 class FossilExplorationNode(WorldROSWrapper):
     def __init__(self):
         super().__init__(state_pub_rate=0.1, dynamics_rate=0.01)
         self.exploration_grid = ExplorationGrid(width=20.0, height=20.0)
 
+        self.charging_coordinator = ChargingCoordinator()
+        self.explorer_battery = None
+
         self.explorer_timer = self.create_timer(2.0, self.explorer_behavior)
+        self.battery_timer = self.create_timer(1.0, self.battery_behavior)
         self.explorer_exploring = False
         self.explorer_status_pub = self.create_publisher(String, 'explorer_status', 10)
         
@@ -441,6 +478,28 @@ class FossilExplorationNode(WorldROSWrapper):
     def set_world(self, world):
         super().set_world(world)
         self.exploration_grid.set_world(world)
+        
+        #Initialise explorer battery manager
+        explorer = self.get_robot_by_name('explorer')
+        if explorer:
+            self.explorer_battery = ExplorerBatteryManager(
+                explorer, 
+                world,
+                self.charging_coordinator
+            )
+
+    def print_exploration_progress(self):
+        unexplored = 0
+        total = 0
+        for x in range(self.exploration_grid.width):
+            for y in range(self.exploration_grid.height):
+                if self.exploration_grid.is_valid_point(*self.exploration_grid.grid_to_world(x, y)):
+                    total += 1
+                    if self.exploration_grid.grid[x][y] == -1:
+                        unexplored += 1
+                        
+        exploration_ratio = (1 - (unexplored / total)) * 1.92
+        self.get_logger().info(f"Exploration progress: {exploration_ratio:.2%}")
 
     def collect_fossil(self, fossil, collector):
         if not hasattr(fossil, 'pose'):
@@ -496,7 +555,7 @@ class FossilExplorationNode(WorldROSWrapper):
         data = {
             "name": "fossil" + loc.name[-1:],
         }
-        # msg.data = f"FOSSIL_FOUND:{obj.pose.x},{obj.pose.y}"
+        #msg.data = f"FOSSIL_FOUND:{obj.pose.x},{obj.pose.y}"
         msg.data = json.dumps(data)
         self.fossil_discovery_pub.publish(msg)
 
@@ -518,8 +577,32 @@ class FossilExplorationNode(WorldROSWrapper):
                     
         return None, None
 
+    def battery_behavior(self):
+        if self.explorer_battery:
+            self.explorer_battery.update_battery()
+
+    def get_nearest_base_pose(self):
+        base = self.world.get_location_by_name("base_station0")
+        if not base:
+            return None
+            
+        nearest_pose = None
+        min_dist = float('inf')
+        
+        explorer = self.get_robot_by_name('explorer')
+        if not explorer:
+            return None
+            
+        for pose in base.nav_poses:
+            dist = explorer.get_pose().get_linear_distance(pose)
+            if dist < min_dist:
+                min_dist = dist
+                nearest_pose = pose
+                
+        return nearest_pose
+
     def explorer_behavior(self):
-        if not hasattr(self, 'world'):
+        if not hasattr(self, 'world') or not self.explorer_battery:
             return
                 
         explorer = self.get_robot_by_name('explorer')
@@ -528,10 +611,66 @@ class FossilExplorationNode(WorldROSWrapper):
 
         current_pose = explorer.get_pose()
         
+        #Handle charging states
+        if self.explorer_battery.needs_charging():
+            if self.explorer_battery.is_at_charger():
+                if self.explorer_battery.battery.charge < 95.0:
+                    self.get_logger().info(f'Currently charging... ({self.explorer_battery.battery.charge}%)')
+                    return
+                else:
+                    self.get_logger().info('Fully charged, resuming exploration')
+            else:
+                self.get_logger().info('Battery level low, seeking charging station...')
+                if explorer.is_moving():
+                    if self.explorer_battery.is_scanning_enabled():
+                        self.check_along_path(explorer)
+                return
+
+        #Only perform scanning if enabled in battery manager
+        if self.explorer_battery.is_scanning_enabled():
+            detected_objects = self.check_for_objects(current_pose)
+            if detected_objects:
+                for obj, category in detected_objects:
+                    self.get_logger().info(f'Detected {category} at ({obj.pose.x:.2f}, {obj.pose.y:.2f})')
+                    
+                    if category in ['rock', 'bush']:
+                        self.exploration_grid.map_obstacle_boundary(obj.pose, category)
+                        self.get_logger().info(f'Mapped {category} boundary at ({obj.pose.x:.2f}, {obj.pose.y:.2f})')
+                        
+                    elif category == 'fossil_site_box' and obj not in self.discovered_fossils:
+                        self.discovered_fossils.add(obj)
+                        self.publish_fossil_object(obj)
+                        self.exploration_grid.add_object(obj.pose.x, obj.pose.y, category)
+                    
+                    self.exploration_grid.add_object(obj.pose.x, obj.pose.y, category)
+
+            #Only mark area as explored if scanning is enabled
+            self.exploration_grid.mark_area_explored(current_pose.x, current_pose.y)
+
         if not explorer.is_moving():
             next_x, next_y = self.exploration_grid.get_next_exploration_target(
                 current_pose.x, current_pose.y
             )
+            
+            if abs(current_pose.x) < 0.5 and abs(current_pose.y) < 0.5 and \
+               abs(next_x) < 0.5 and abs(next_y) < 0.5:
+                self.get_logger().info('Exploration complete, staying at base')
+                return
+                
+            if abs(next_x) < 0.1 and abs(next_y) < 0.1:
+                self.get_logger().info('No more exploration targets, returning to base')
+                base_pose = self.get_nearest_base_pose()
+                if base_pose:
+                    success = self.explorer_battery.execute_path_safely(base_pose)
+                    if not success:
+                        self.get_logger().warn('Failed to plan path to base, will try alternative approach')
+                        unstuck_x, unstuck_y = self.get_unstuck_position(current_pose)
+                        if unstuck_x is not None:
+                            intermediate_pose = Pose(x=unstuck_x, y=unstuck_y)
+                            success = self.explorer_battery.execute_path_safely(intermediate_pose)
+                            if success:
+                                self.get_logger().info('Found alternative path to base')
+                return
             
             if next_x is not None and next_y is not None:
                 waypoints = self.exploration_grid.find_optimal_path(
@@ -539,81 +678,96 @@ class FossilExplorationNode(WorldROSWrapper):
                 )
                 
                 if waypoints:
+                    attempted_waypoints = set()
+                    success = False
+                    
                     for wx, wy in waypoints:
-                        goal_pose = Pose(x=wx, y=wy)
-                        path = self.safe_plan_path(explorer, explorer.get_pose(), goal_pose)
+                        if (wx, wy) in attempted_waypoints:
+                            continue
                         
-                        if path is not None:
-                            explorer.follow_path(path)
-                            self.get_logger().info(
-                                f'Moving to waypoint ({wx:.2f}, {wy:.2f}) '
-                                f'in {self.exploration_grid.exploration_mode} mode'
-                            )
-                            break
+                        attempted_waypoints.add((wx, wy))
+                        goal_pose = Pose(x=wx, y=wy)
+                        
+                        try:
+                            success = self.explorer_battery.execute_path_safely(goal_pose)
+                            
+                            if success:
+                                self.get_logger().info(
+                                    f'Moving to waypoint ({wx:.2f}, {wy:.2f}) '
+                                    f'in {self.exploration_grid.exploration_mode} mode'
+                                )
+                                self.exploration_grid.stuck_count = 0
+                                self.print_exploration_progress()
+                                break
+                        except Exception as e:
+                            self.get_logger().warn(f'Path execution failed: {str(e)}')
+                            continue
+                    
+                    if not success:
+                        self.exploration_grid.stuck_count += 1
+                        self.get_logger().warn(
+                            f'Failed to reach any waypoints (stuck count: {self.exploration_grid.stuck_count})'
+                        )
+                        
+                        if self.exploration_grid.stuck_count >= self.exploration_grid.MAX_STUCK_COUNT:
+                            self.get_logger().info('Maximum stuck count reached, attempting to return to base')
+                            base_pose = self.get_nearest_base_pose()
+                            if base_pose:
+                                try:
+                                    success = self.explorer_battery.execute_path_safely(base_pose)
+                                    if success:
+                                        self.get_logger().info('Successfully planning return to base')
+                                        self.exploration_grid.stuck_count = 0
+                                        return
+                                except Exception as e:
+                                    self.get_logger().warn(f'Failed to plan return to base: {str(e)}')
                 else:
                     self.get_logger().info('Attempting to get unstuck...')
                     unstuck_x, unstuck_y = self.get_unstuck_position(current_pose)
                     
                     if unstuck_x is not None:
                         goal_pose = Pose(x=unstuck_x, y=unstuck_y)
-                        path = self.safe_plan_path(explorer, explorer.get_pose(), goal_pose)
-                        
-                        if path is not None:
-                            explorer.follow_path(path)
-                            self.get_logger().info(f'Moving to clear position at ({unstuck_x:.2f}, {unstuck_y:.2f})')
-                            return
+                        try:
+                            success = self.explorer_battery.execute_path_safely(goal_pose)
+                            
+                            if success:
+                                self.get_logger().info(
+                                    f'Moving to clear position at ({unstuck_x:.2f}, {unstuck_y:.2f})'
+                                )
+                                self.exploration_grid.stuck_count = 0
+                                return
+                        except Exception as e:
+                            self.get_logger().warn(f'Failed to move to unstuck position: {str(e)}')
                     
-                    self.get_logger().warn('Unable to find clear path, switching exploration mode')
-                    if self.exploration_grid.exploration_mode == 'spiral':
-                        self.exploration_grid.exploration_mode = 'parallel'
-                    elif self.exploration_grid.exploration_mode == 'parallel':
-                        self.exploration_grid.exploration_mode = 'wall_follow'
-                    else:
-                        self.exploration_grid.exploration_mode = 'spiral'
-                        self.exploration_grid.spiral_params['radius'] = 1.0
-                        self.exploration_grid.spiral_params['angle'] = 0.0
+                    self.exploration_grid.stuck_count += 1
+                    if self.exploration_grid.stuck_count >= self.exploration_grid.MAX_STUCK_COUNT:
+                        self.get_logger().warn('Unable to find clear path, switching exploration mode')
+                        if self.exploration_grid.exploration_mode == 'spiral':
+                            self.exploration_grid.exploration_mode = 'parallel'
+                        elif self.exploration_grid.exploration_mode == 'parallel':
+                            self.exploration_grid.exploration_mode = 'wall_follow'
+                        else:
+                            self.exploration_grid.exploration_mode = 'spiral'
+                            self.spiral_params = {
+                                'angle': 0.0,
+                                'radius': 1.0,
+                                'step': 0.3
+                            }
+                        self.exploration_grid.stuck_count = 0
             else:
-                self.get_logger().info('No unexplored areas found, reviewing coverage...')
+                base_pose = self.get_nearest_base_pose()
+                if base_pose:
+                    self.get_logger().info('No exploration targets found, returning to base')
+                    try:
+                        success = self.explorer_battery.execute_path_safely(base_pose)
+                        if not success:
+                            self.get_logger().warn('Failed to plan path to base, will try again')
+                    except Exception as e:
+                        self.get_logger().warn(f'Error returning to base: {str(e)}')
         
-        detected_objects = self.check_for_objects(current_pose)
-        if detected_objects:
-            for obj, category in detected_objects:
-                self.get_logger().info(f'Detected {category} at ({obj.pose.x:.2f}, {obj.pose.y:.2f})')
-                
-                if category in ['rock', 'bush']:
-                    self.exploration_grid.map_obstacle_boundary(obj.pose, category)
-                    self.get_logger().info(f'Mapped {category} boundary at ({obj.pose.x:.2f}, {obj.pose.y:.2f})')
-                    if hasattr(obj, 'footprint'):
-                        self.get_logger().info(f'Obstacle footprint: {obj.footprint}')
-                        
-                elif category == 'fossil_site_box' and obj not in self.discovered_fossils:
-                    self.discovered_fossils.add(obj)
-                    self.publish_fossil_object(obj)
-                    self.exploration_grid.add_object(obj.pose.x, obj.pose.y, category)
-                
-                self.exploration_grid.add_object(obj.pose.x, obj.pose.y, category)
-        
-        if explorer.is_moving():
+        if explorer.is_moving() and self.explorer_battery.is_scanning_enabled():
             self.check_along_path(explorer)
-            
             self.exploration_grid.mark_area_explored(current_pose.x, current_pose.y)
-            
-            if detected_objects:
-                found_obstacle = False
-                for obj, category in detected_objects:
-                    if category in ['rock', 'bush']:
-                        found_obstacle = True
-                        break
-                
-                if found_obstacle:
-                    next_waypoint = explorer.get_current_goal()
-                    if next_waypoint:
-                        if not self.exploration_grid.is_path_clear(
-                            current_pose.x, current_pose.y,
-                            next_waypoint.x, next_waypoint.y
-                        ):
-                            self.get_logger().info('Obstacle detected on path, replanning...')
-                            explorer.cancel_actions()
 
     def get_first_object(self):
         fossil_objects: list[Object] = [obj for obj in self.world.objects if obj.category == 'fossil']
@@ -623,6 +777,9 @@ class FossilExplorationNode(WorldROSWrapper):
 
     def check_line_of_sight(self, start_x, start_y, end_x, end_y, obstacles):
         for obstacle in obstacles:
+            if obstacle.category not in ['rock', 'bush']:
+                continue
+                
             line = LineString([(start_x, start_y), (end_x, end_y)])
             
             if hasattr(obstacle, 'polygon') and obstacle.polygon.intersects(line):
@@ -636,7 +793,7 @@ class FossilExplorationNode(WorldROSWrapper):
 
     def check_for_objects(self, robot_pose, detection_params={
             'radius': 3.0,
-            'min_probability': 0.4,
+            'min_probability': 0.3,  #Lowered threshold for better detection
             'n_rays': 64,
             'scan_interval': 0.2
         }):
@@ -913,7 +1070,7 @@ if __name__ == "__main__":
     # node = FossilExplorationNode()
     # collector_node = CollectorRobot()
 
-    # # world = create_fossil_world(random_seed=random.randint(0, 100))
+    # world = create_fossil_world(random_seed=random.randint(0, 100))
     # world = create_fossil_world(random_seed=1123)
 
     # node.set_world(world)
