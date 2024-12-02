@@ -62,6 +62,7 @@ def create_fossil_world(
     n_fossils: int = 5,
     n_rocks: int = 6,
     n_bushes: int = 4,
+    n_chargers: int = 2,
     random_seed: int = 42,
 ):
     world = World()
@@ -103,7 +104,7 @@ def create_fossil_world(
         world, room, "bush", count=n_bushes, random_seed=random_seed + 3 * 42
     )
     add_locations_to_room(
-        world, room, "charger", count=2, random_seed=random_seed + 3 * 42
+        world, room, "charger", count=n_chargers, random_seed=random_seed + 3 * 42
     )
 
     planner_config = {

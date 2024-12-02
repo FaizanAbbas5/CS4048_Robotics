@@ -25,7 +25,7 @@ from pyrobosim.navigation import ConstantVelocityExecutor, RRTPlanner
 from pyrobosim.utils.pose import Pose
 from pyrobosim.utils.general import get_data_folder
 from pyrobosim_ros.ros_interface import WorldROSWrapper
-from fossil_collector_robot import CollectorRobot
+from fossil_collector_robot import CollectorRobot, FOSSIL_DISCOVERIES_TOPIC
 from charging_coordinator import ChargingCoordinator
 from explorer_battery_manager import ExplorerBatteryManager
 
@@ -471,7 +471,7 @@ class FossilExplorationNode(WorldROSWrapper):
         self.explorer_status_pub = self.create_publisher(String, "explorer_status", 10)
 
         self.fossil_discovery_pub = self.create_publisher(
-            String, "fossil_discoveries", 10
+            String, FOSSIL_DISCOVERIES_TOPIC, 10
         )
         self.discovered_fossils = set()
 
@@ -479,9 +479,8 @@ class FossilExplorationNode(WorldROSWrapper):
         self.returning_to_base = False
         self.test_timer = self.create_timer(5.0, self.test_fossil_discovery)
 
-        # self.collector_timer = self.create_timer(2.0, self.collector_behavior)
         self.fossil_discovery_sub = self.create_subscription(
-            String, "fossil_discoveries", self.fossil_discovery_callback, 10
+            String, FOSSIL_DISCOVERIES_TOPIC, self.fossil_discovery_callback, 10
         )
         self.collection_queue = []
         self.collector_busy = False
@@ -1101,87 +1100,6 @@ class FossilExplorationNode(WorldROSWrapper):
 
         self.collected_fossils = []
 
-    def collector_behavior(self):
-        if not hasattr(self, "world"):
-            return
-
-        collector = self.get_robot_by_name("collector")
-        if collector is None:
-            return
-
-        if (
-            not self.collector_busy
-            and not self.returning_to_base
-            and self.collection_queue
-        ):
-            x, y = self.collection_queue[0]
-
-            goal_pose = self.get_valid_collection_pose(x, y, collector)
-
-            if goal_pose is not None:
-                path = collector.path_planner.plan(collector.get_pose(), goal_pose)
-                if path is not None:
-                    collector.follow_path(path)
-                    self.collector_busy = True
-                    self.get_logger().info(
-                        f"Collector moving near fossil at ({x}, {y})"
-                    )
-                else:
-                    self.get_logger().warn(f"Failed to plan path to collection pose")
-            else:
-                self.get_logger().warn(
-                    f"Failed to find valid collection pose near ({x}, {y})"
-                )
-                self.collection_queue.append(self.collection_queue.pop(0))
-
-        elif self.collector_busy and not collector.is_moving():
-            if self.collection_queue:
-                x, y = self.collection_queue.pop(0)
-
-                fossil_objects = [
-                    obj for obj in self.world.objects if obj.category == "fossil"
-                ]
-                for fossil in fossil_objects:
-                    dx = fossil.pose.x - x
-                    dy = fossil.pose.y - y
-                    distance = np.sqrt(dx * dx + dy * dy)
-                    if distance < 0.3:
-                        self.collect_fossil(fossil, collector)
-                        break
-
-            self.collector_busy = False
-            self.returning_to_base = True
-            self.get_logger().info("Fossil collected, planning return to base")
-
-            goal_pose = self.get_valid_base_pose(collector)
-
-            if goal_pose is not None:
-                path = collector.path_planner.plan(collector.get_pose(), goal_pose)
-                if path is not None:
-                    collector.follow_path(path)
-                    self.get_logger().info(
-                        f"Returning to base position at ({goal_pose.x:.2f}, {goal_pose.y:.2f})"
-                    )
-                else:
-                    self.get_logger().error(
-                        "Failed to plan path to valid base position"
-                    )
-                    self.returning_to_base = False
-            else:
-                self.get_logger().error("Could not find any valid base return position")
-                self.returning_to_base = False
-
-        elif self.returning_to_base and not collector.is_moving():
-            time.sleep(0.5)
-
-            self.deposit_fossils_at_base(collector)
-
-            self.returning_to_base = False
-            self.get_logger().info("Successfully reached base station")
-            self.get_logger().info(
-                f"Remaining fossils in queue: {len(self.collection_queue)}"
-            )
-
 
 def main():
     # Initialize ROS2
@@ -1189,6 +1107,7 @@ def main():
 
     # Create the world with a fixed random seed
     world = create_fossil_world(n_rocks=8, n_bushes=4, random_seed=237)
+    # world = create_fossil_world(width=30, height=40, n_rocks=10, n_bushes=4, n_chargers=2, n_fossils=20, random_seed=345)
 
     # Create the nodes
     exploration_node = FossilExplorationNode()
@@ -1226,24 +1145,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-    # rclpy.init()
-
-    # node = FossilExplorationNode()
-    # collector_node = CollectorRobot()
-
-    # world = create_fossil_world(random_seed=random.randint(0, 100))
-    # world = create_fossil_world(random_seed=1123)
-
-    # node.set_world(world)
-    # collector_node.set_world(world)
-
-    # node.get_logger().info('Starting FossilExplorationNode')
-
-    # ros_thread = threading.Thread(target=lambda: node.start(wait_for_gui=True))
-    # ros_thread.start()
-
-    # ros_thread2 = threading.Thread(target=lambda: collector_node.start(wait_for_gui=True))
-    # ros_thread2.start()
-
-    # start_gui(node.world)
