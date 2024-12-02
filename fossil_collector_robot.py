@@ -313,7 +313,7 @@ class CollectorRobot(WorldROSWrapper):
         self.get_robot().battery_level = new_charge
         self.world.gui.on_robot_changed()
 
-    def follow_path_with_drain(self, path):
+    def follow_path_with_drain(self, path: Path):
         robot = self.get_robot()
         result = robot.follow_path(path)
         # update battery charge
