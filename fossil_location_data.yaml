@@ -3,12 +3,98 @@ base_station:
   description: Base station for robots
   footprint:
     type: circle
-    radius: 0.5
-  height: 0.0
+    radius: 1
+    height: 0.1
+  nav_poses:
+    - [0, 1.5, -1.57]
+    - [0, -1.5, 1.57]
+    - [1.5, 0, -3.14]
+    - [-1.5, 0, 0]
+  locations:
+    - name: "top"
+      footprint:
+        type: parent
+        padding: 0.0
+  color: [1, 0, 0]
 
 fossil_site:
   description: Location where fossils might be found
   footprint:
     type: circle
-    radius: 0.3
-  height: 0.0
+    radius: 0.5
+    height: 0.1
+  nav_poses:
+    - [-1, 0, 0]     # left
+    - [1, 0, 3.14]   # right
+    - [0, 1, -1.57]  # above
+    - [0, -1, 1.57]  # below
+  locations:
+    - name: "top"
+      footprint:
+        type: parent
+        padding: 0.0
+  color: [0, 1, 0]
+
+fossil_site_box:
+  footprint:
+    type: box
+    dims: [0.3, 0.3]
+    height: 0.5
+  nav_poses:
+    - [-0.5, 0, 0]     # left
+    - [0.5, 0, 3.14]   # right
+    - [0, 0.5, -1.57]  # above
+    - [0, -0.5, 1.57]  # below
+  locations:
+    - name: "ground"
+      footprint:
+        type: parent
+        padding: 0
+  color: [0.2, 0, 0]
+
+
+rock:
+  footprint:
+    type: box
+    dims: [1.25, 1.25]
+    height: 2
+  nav_poses:
+    - [-1.25, 0, 0]
+    - [1.25, 0, 0]
+  locations:
+    - name: "loc2?"
+      footprint:
+        type: parent
+        padding: 0
+  color: grey
+
+bush:
+  footprint:
+    type: circle
+    radius: 0.6
+    height: 2
+  nav_poses:
+    - [-1.25, 0, 0]
+    - [1.25, 0, 0]
+  locations:
+    - name: "loc2??"
+      footprint:
+        type: parent
+        padding: 0
+  color: green
+
+charger:
+  footprint:
+    type: box
+    dims: [0.3, 0.3]
+    # height: 2
+  nav_poses:
+    - [-0.5, 0, 0]
+    - [0.5, 0, 0]
+  locations:
+    - name: "loc2??"
+      footprint:
+        type: parent
+        padding: 0
+  color: green
+  is_charger: True
