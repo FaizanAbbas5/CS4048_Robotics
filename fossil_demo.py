@@ -31,6 +31,7 @@ from explorer_battery_manager import ExplorerBatteryManager
 
 
 class ExplorationGrid:
+    # Model the world to allow the explorer to explore it
     def __init__(self, width, height, world=None, resolution=0.5):
         self.world = world
         self.resolution = resolution
@@ -56,6 +57,7 @@ class ExplorationGrid:
             "max_y": height / 2 - 1.0,
         }
 
+        # The explorer traverses the map with a spiral movement
         self.exploration_mode = "spiral"  # ['spiral', 'wall_follow', 'parallel']
         self.spiral_params = {
             "angle": 0.0,
@@ -94,6 +96,7 @@ class ExplorationGrid:
             self.last_visit_time[grid_x, grid_y] = self.current_time
 
     def add_object(self, x, y, obj_type, certainty=1.0):
+        # adds objects to the world, takes x and y coordinates and the object type as input
         grid_x, grid_y = self.world_to_grid(x, y)
         key = (grid_x, grid_y)
         self.object_locations[key] = {
@@ -460,12 +463,14 @@ class ExplorationGrid:
 class FossilExplorationNode(WorldROSWrapper):
     def __init__(self):
         super().__init__(state_pub_rate=0.1, dynamics_rate=0.01)
+        # The grid is set to 20 x 20
         self.exploration_grid = ExplorationGrid(width=20.0, height=20.0)
 
         self.charging_coordinator = ChargingCoordinator()
         self.explorer_battery = None
 
         self.explorer_timer = self.create_timer(2.0, self.explorer_behavior)
+        # This is a callback for managing the explorer's battery
         self.battery_timer = self.create_timer(1.0, self.battery_behavior)
         self.explorer_exploring = False
         self.explorer_status_pub = self.create_publisher(String, "explorer_status", 10)
@@ -482,9 +487,11 @@ class FossilExplorationNode(WorldROSWrapper):
         self.fossil_discovery_sub = self.create_subscription(
             String, FOSSIL_DISCOVERIES_TOPIC, self.fossil_discovery_callback, 10
         )
+        # collection queue is set to empty to begin with
         self.collection_queue = []
         self.collector_busy = False
 
+        # Initially, there are no fossils collected
         self.collected_fossils = []
 
         self.get_logger().info(
@@ -536,6 +543,7 @@ class FossilExplorationNode(WorldROSWrapper):
             )
 
     def print_exploration_progress(self):
+        # This method tracks the percentage of the map explored by the explorer
         unexplored = 0
         total = 0
         for x in range(self.exploration_grid.width):
@@ -548,13 +556,16 @@ class FossilExplorationNode(WorldROSWrapper):
                         unexplored += 1
 
         exploration_ratio = (1 - (unexplored / total)) * 1.92
+        # The exploration progress can be seen through the terminal
         self.get_logger().info(f"Exploration progress: {exploration_ratio:.2%}")
 
     def collect_fossil(self, fossil, collector):
+        # This method allows the 'collector' robot to collect fossils
         if not hasattr(fossil, "pose"):
             return False
 
         try:
+            # here we get the collector robot for fossil collection
             robot = self.get_robot_by_name("collector")
             success = robot.pick_object("fossil1")
             self.get_logger().info(f"Collected fossil at ({success})")
@@ -569,6 +580,7 @@ class FossilExplorationNode(WorldROSWrapper):
 
             self.collected_fossils.append(fossil)
 
+            # The coordinates of the collection site can be seen from the terminal
             self.get_logger().info(
                 f"Collected fossil at ({fossil.original_pose.x:.2f}, {fossil.original_pose.y:.2f})"
             )
@@ -589,6 +601,7 @@ class FossilExplorationNode(WorldROSWrapper):
                     f"Found {category} while moving at ({obj.pose.x:.2f}, {obj.pose.y:.2f})"
                 )
 
+                # This allows the explorer to publish information about an explored fossil
                 if category == "fossil_site_box":
                     if obj not in self.discovered_fossils:
                         self.discovered_fossils.add(obj)
@@ -634,6 +647,7 @@ class FossilExplorationNode(WorldROSWrapper):
         return None, None
 
     def battery_behavior(self):
+        # a method to update the explorer's battery
         if self.explorer_battery:
             self.explorer_battery.update_battery()
 
@@ -714,6 +728,8 @@ class FossilExplorationNode(WorldROSWrapper):
             # Only mark area as explored if scanning is enabled
             self.exploration_grid.mark_area_explored(current_pose.x, current_pose.y)
 
+        # Once the explorer has explored the required percentage of the map, it returns to the base
+        # This is done to mimic a real-life situation, preserving the robot's battery.
         if not explorer.is_moving():
             next_x, next_y = self.exploration_grid.get_next_exploration_target(
                 current_pose.x, current_pose.y
@@ -1018,6 +1034,7 @@ class FossilExplorationNode(WorldROSWrapper):
         return None
 
     def remove_fossil_from_world(self, x, y, radius=0.3):
+        # Method to deal with a fossil once it has been collected
         if not hasattr(self, "world"):
             return False
 
@@ -1081,6 +1098,7 @@ class FossilExplorationNode(WorldROSWrapper):
                 )
 
     def deposit_fossils_at_base(self, collector):
+        # Once a fossil has been collected from the fossil site, the collector returns it to the base
         for fossil in self.collected_fossils:
             try:
                 angle = len(self.collected_fossils) * (
@@ -1102,10 +1120,11 @@ class FossilExplorationNode(WorldROSWrapper):
 
 
 def main():
-    # Initialize ROS2
+    # Initialize ROS2 (python client library)
     rclpy.init()
 
     # Create the world with a fixed random seed
+    # The values can be changed to test the program in different settings
     world = create_fossil_world(n_rocks=8, n_bushes=4, random_seed=237)
     # world = create_fossil_world(width=30, height=40, n_rocks=10, n_bushes=4, n_chargers=2, n_fossils=20, random_seed=345)
 
