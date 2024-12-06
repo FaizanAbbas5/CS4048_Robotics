@@ -13,6 +13,7 @@ This project uses ROS2 and pyrobosim to simulate two autonomous robots that work
 - Battery simulation and management
 
 ## Running the simulation
+1. Make sure pyrobosim is installed locally follofing [these steps](https://pyrobosim.readthedocs.io/en/latest/setup.html#local-setup)
 1. Clone the repository into directory
    ``` pyrobosim_ws/src/pyrobosim/pyrobosim_ros/examples```
 2. Run the file ```source source_pyrobosim.bash``` from directory ```pyrobosim_ws/src/pyrobosim/setup```
